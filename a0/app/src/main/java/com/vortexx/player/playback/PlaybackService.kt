@@ -153,6 +153,7 @@ class PlaybackService : MediaSessionService() {
      * Battery mode allows hardware offload where the phone supports it; the
      * processor then declines the stream and the Audio Lab reports the mode Media3 actually opened.
      */
+    @androidx.annotation.OptIn(UnstableApi::class)
     private fun observeOutputMode(player: ExoPlayer) {
         serviceScope.launch {
             audioEngine.outputMode.collect { mode ->
