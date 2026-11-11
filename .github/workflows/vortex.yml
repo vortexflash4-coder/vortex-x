@@ -1,5 +1,6 @@
-
 # VORTEX X phone build. Upload a project zip -> APK. Run workflow -> create-signing-key once.
+# Each build also force-pushes its summary, logs and test reports to the branch ci-results
+# (no APK, no keys), so the results can be read without screenshots.
 name: VORTEX X build
 on:
   push:
@@ -11,7 +12,7 @@ on:
         options: [build, create-signing-key]
         default: build
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: vx-${{ inputs.task || 'build' }}
   cancel-in-progress: true
@@ -47,7 +48,12 @@ jobs:
           unzip -q "$zip" -d _p
           d="$(dirname "$(find _p -maxdepth 4 -name gradlew | head -n 1)")"
           echo "dir=$d" >> "$GITHUB_OUTPUT"
-          bash "$d/.github/scripts/ci-build.sh" "$d" "$PWD/ci-logs"
+          rc=0
+          bash "$d/.github/scripts/ci-build.sh" "$d" "$PWD/ci-logs" || rc=$?
+          mkdir -p ci-logs/tests
+          cp "$GITHUB_STEP_SUMMARY" ci-logs/summary.md || true
+          cp "$d"/app/build/test-results/testDebugUnitTest/*.xml ci-logs/tests/ 2>/dev/null || true
+          exit $rc
       - if: ${{ always() && inputs.task == 'create-signing-key' }}
         uses: actions/upload-artifact@v4
         with:
@@ -68,3 +74,13 @@ jobs:
             ${{ steps.run.outputs.dir }}/app/build/reports/
             ${{ steps.run.outputs.dir }}/app/build/test-results/
           if-no-files-found: ignore
+      - if: ${{ always() && steps.run.outputs.dir != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.run_number }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/res" && cp -r ci-logs/. "$RUNNER_TEMP/res/" && cd "$RUNNER_TEMP/res"
+          git init -q && git add -A
+          git -c user.name=vortex-ci -c user.email=vortex-ci@users.noreply.github.com commit -qm "CI run $RUN"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:refs/heads/ci-results
