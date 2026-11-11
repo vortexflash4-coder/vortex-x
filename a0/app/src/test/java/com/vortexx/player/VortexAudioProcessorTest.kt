@@ -239,8 +239,15 @@ class VortexAudioProcessorTest {
             input.flip()
             // Include native/direct buffer counts: heap accounting alone would miss native growth.
             val pool = DirectBufferCounter.create()
-            repeat(1000) {
-                input.clear()
+            // Warm the same paths we measure, including cold bulk-copy/bypass,
+            // short chunks and coefficient ramps. Warming only constant DSP
+            // settings left those branches cold and made this HotSpot benchmark
+            // sensitive to one-time VM activity. The measured 5000-buffer workload
+            // and <1024-byte gate below remain unchanged.
+            repeat(5000) { iteration ->
+                input.clear().limit((if (iteration % 2 == 0) 4097 else 17) * frameBytes)
+                host.processingAllowed = iteration % 7 != 0
+                host.parameters = presets[iteration % 2]
                 while (input.hasRemaining()) { processor.queueInput(input); val out = processor.getOutput(); out.position(out.limit()) }
             }
             val nativeBytes = pool.memoryUsed
