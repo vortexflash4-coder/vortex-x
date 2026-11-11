@@ -1,0 +1,35 @@
+name: Inspect Phase 1 signing inventory
+on:
+  push:
+    branches: [ 'codex/a0-verification-20261111' ]
+    paths: [ '.github/workflows/a0-key-inventory.yml' ]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect Phase 1 archive file names
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, zipfile
+          archive = Path("VortexX-phase1-reviewed.zip")
+          result = {"archive": str(archive), "exists": archive.is_file()}
+          if archive.is_file():
+              result["archive_sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+              with zipfile.ZipFile(archive) as z:
+                  result["keystore_file_names"] = [n for n in z.namelist() if n.lower().endswith((".keystore", ".jks", ".p12", ".pfx"))]
+                  result["gradle_signing_file_names"] = [n for n in z.namelist() if n.endswith(("build.gradle", "build.gradle.kts", "keystore.properties"))]
+          Path("phase1-signing-inventory.json").write_text(json.dumps(result, indent=2) + "\n")
+          print(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phase1-signing-inventory
+          path: phase1-signing-inventory.json
+          if-no-files-found: error
+          retention-days: 14
