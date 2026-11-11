@@ -11,6 +11,14 @@ Last updated: 2026-11-11 (Stage A0 review)
 | **Unit-tested** | JVM tests passed in the explicitly named environment (`testDebugUnitTest`); no skipped allocation gates. |
 | **Device-tested** | The owner confirmed it on a real phone. |
 
+## Active install target
+
+The owner has uninstalled Phase 1. The review workflow now selects **fresh-install**,
+checks the pinned A0 debug key, and retains the separate **phase1-upgrade** mode.
+Earlier Phase 1 mismatch results below remain historical facts. A fresh-install
+CI run is in progress; phone verification and A1 remain pending. No recovery of
+the uninstalled app's settings, favourites or playlists is claimed.
+
 ## Stage A0 review — hosted build/tests pass, phone gate blocked
 
 - GitHub Actions: https://github.com/vortexflash4-coder/vortex-x/actions/runs/43005390295
@@ -63,3 +71,4 @@ Run annotations (warnings, not failures): Node.js 20 deprecation for the actions
 
 - APK installed on the owner's phone on 2026-11-11 and runs. Finish "Device-tested" from `docs/TESTING.md` (manual table).
 - Instrumented tests (`VortexDatabaseTest`, `PlaybackEngineTest`, `AppNavigationTest`) are compiled but have not run on a device or emulator.
+

@@ -118,3 +118,16 @@ hardware scenario explicitly. A1 cannot begin until owner confirms phone A0.
 ## Hosted verification update
 
 The final CI run passed 61 JVM tests with 0 skipped, both APK assemblies, and lint with 0 errors / 37 warnings. The full job fails at Phase 1 signing compatibility. Adapter allocation warm-up now exercises 5,000 inputs covering the same paths as the unchanged 5,000-input measured loop; the <1,024-byte threshold and direct-buffer assertions are unchanged. Final heap measurements: core 0, PCM16 256, float 0 bytes. The earlier 1,144-byte failure is retained in the review evidence. These results describe warmed JVM processing, not Android cold-start allocation behavior. No phone verification or A1 work has started.
+
+
+## Fresh-install target after Phase 1 uninstall
+
+The owner reported uninstalling Phase 1 on 11 November 2026. The active review
+workflow now defaults to `fresh-install`, verifies the pinned stable A0 debug
+certificate, and produces a phone-test APK without requiring the old key.
+Package identity stays `com.vortexx.player.debug`. Restoration of the uninstalled
+Phase 1 app data is not claimed. The original Phase 1 certificate file and
+`phase1-upgrade` verifier mode remain intact for genuine data-preserving updates.
+The verifier CLI still defaults to `phase1-upgrade`; fresh install is explicitly
+selected by the workflow. Production signing is unchanged. A1 remains blocked
+until the A0 phone checklist is completed.

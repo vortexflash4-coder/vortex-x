@@ -25,9 +25,9 @@ android {
     }
 
     signingConfigs {
-        // Phase 1 was signed with a different key. Supply its ORIGINAL debug
-        // keystore for data-preserving updates. The bundled key is only a build/
-        // emulator fallback; verify-apk.py refuses to approve it for that phone.
+        // The bundled fixed A0 debug key supports fresh installs and later A0
+        // updates. Phase 1 was signed with another key: supply its ORIGINAL
+        // debug keystore and select phase1-upgrade for a data-preserving update.
         // These variables are debug-only. Release signing remains unconfigured.
         getByName("debug") {
             storeFile = file(providers.environmentVariable("VORTEX_DEBUG_KEYSTORE").orNull ?: "vortex-debug.keystore")
@@ -138,3 +138,4 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
+

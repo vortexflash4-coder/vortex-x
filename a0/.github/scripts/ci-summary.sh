@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 
 project, logs, out = sys.argv[1], sys.argv[2], sys.argv[3]
 project = os.path.abspath(project)
-outcome = {k: (os.environ.get(k) or "skipped") for k in ("ASSEMBLE", "UNIT", "ANDROIDTEST", "LINT", "SIGNING")}
+outcome = {k: (os.environ.get(k) or "skipped") for k in ("ASSEMBLE", "UNIT", "ANDROIDTEST", "LINT", "SIGNING", "VERIFIER")}
 icon = {"success": "✅", "failure": "❌", "cancelled": "⛔", "skipped": "⏭️"}
 lines = []
 w = lines.append
@@ -33,6 +33,11 @@ def rel(path):
     return path
 
 w("## VORTEX X — " + os.environ.get("VALIDATION_CONTEXT", "CI") + " result\n")
+install_target = os.environ.get("INSTALL_TARGET", "phase1-upgrade")
+w(f"Install target: **{install_target}**")
+if install_target == "fresh-install":
+    w("This run verifies a new A0 installation with its pinned debug key. It does not claim Phase 1 update compatibility or restoration of data from the uninstalled app.")
+w("")
 w("| Step | Result |")
 w("|---|---|")
 for key, label in (
@@ -40,7 +45,8 @@ for key, label in (
     ("UNIT", "JVM unit tests (`testDebugUnitTest`)"),
     ("ANDROIDTEST", "Compile instrumentation tests (`assembleDebugAndroidTest`)"),
     ("LINT", "Lint (report only, never fails the run)"),
-    ("SIGNING", "Phase 1 package and signing compatibility"),
+    ("SIGNING", "APK signature/package for " + install_target),
+    ("VERIFIER", "Signing-target fixture tests (separate from JVM tests)"),
 ):
     o = outcome[key]
     w(f"| {label} | {icon.get(o, '❔')} {o} |")
@@ -50,7 +56,7 @@ w("")
 apks = sorted(glob.glob(os.path.join(project, "app/build/outputs/apk/debug/*.apk")))
 w("### APK")
 w("Stage A0 is not phone-verified by CI. A1 stays blocked until the owner completes the device checklist.")
-w("Only a build with all required gates passing is uploaded as **vortex-x-a0-phone-candidate-apk**.")
+w("Only a build with all required gates passing is uploaded as **vortex-x-a0-" + install_target + "-phone-test-apk**.")
 w("Commit: `" + os.environ.get("GITHUB_SHA", "local run") + "`")
 if outcome["ASSEMBLE"] == "success" and apks:
     for apk in apks:
@@ -164,3 +170,4 @@ for p, line, col, text in annotations:
     loc = f"file={p},line={line}" + (f",col={col}" if col else "")
     print(f"::error {loc}::{msg}")
 PY
+
