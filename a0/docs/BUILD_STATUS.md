@@ -1,40 +1,31 @@
-# Build status — VORTEX X
+# VORTEX X build status — 11 November 2026
 
-Last updated: 2026-11-11 (Stage A0 review)
+## Current A0 fresh-install result — CI SUCCESS
 
-## Evidence levels
+The owner uninstalled Phase 1. The active target is a new A0 installation with
+its pinned stable debug key. Old Phase 1 app-data restoration is not claimed.
 
-| Level | Meaning |
-|---|---|
-| **Written** | The code exists in this repository. |
-| **Compiled** | `assembleDebug` passed in the explicitly named environment; hosted CI is reported separately. |
-| **Unit-tested** | JVM tests passed in the explicitly named environment (`testDebugUnitTest`); no skipped allocation gates. |
-| **Device-tested** | The owner confirmed it on a real phone. |
+Run: https://github.com/vortexflash4-coder/vortex-x/actions/runs/43014067553
+Tested commit: `78c22823b519adffef09ad9a1f82d2196c6c3caf`.
 
-## Active install target
+- Full CI: **SUCCESS** for `fresh-install`.
+- JVM: **61 passed, 0 failed, 0 skipped**; both allocation gates ran.
+- Signing-target fixtures: **8 passed** (separate simulated-output gate tests).
+- `assembleDebug` and `assembleDebugAndroidTest`: **PASS**; instrumentation compiled only.
+- APK signature/package: **PASS**, pinned A0 key, `com.vortexx.player.debug`, version code 3.
+- Lint: **0 errors, 37 warnings**.
+- Heap per measured 5,000 inputs after representative warm-up: core **0**, PCM16 **256**, float **0** bytes; direct growth **0**.
+- The earlier 1,144-byte allocation failure remains in evidence; threshold unchanged.
+- Phone verification: **PENDING**. **A1 NOT STARTED**.
 
-The owner has uninstalled Phase 1. The review workflow now selects **fresh-install**,
-checks the pinned A0 debug key, and retains the separate **phase1-upgrade** mode.
-Earlier Phase 1 mismatch results below remain historical facts. A fresh-install
-CI run is in progress; phone verification and A1 remain pending. No recovery of
-the uninstalled app's settings, favourites or playlists is claimed.
+The CLI default and original certificate file still enforce `phase1-upgrade`
+compatibility when that mode is selected. Earlier mismatch failures are history,
+not a fresh-install failure. Release signing remains separate and unconfigured.
 
-## Stage A0 review — hosted build/tests pass, phone gate blocked
+Current details: `A0_REVIEW_REPORT.md`.
+Current owner checklist: `FRESH_INSTALL_PHONE_CHECKLIST.md`.
 
-- GitHub Actions: https://github.com/vortexflash4-coder/vortex-x/actions/runs/43005390295
-- Tested source: `0fa5a043209c25033c93e74e716352d9fd80af0b`.
-- `assembleDebug`: PASS. `assembleDebugAndroidTest`: PASS, compiled only.
-- JVM: **61 passed, 0 failed, 0 skipped**, including both allocation gates.
-- Final heap measurements: core **0**, PCM16 **256**, float **0** bytes per
-  5,000 measured input buffers; direct growth **0**. Representative warm-up is
-  5,000 inputs; the <1,024-byte gate is unchanged. The earlier 1,144-byte failure
-  is retained in the evidence and review report.
-- Lint: **0 errors, 37 warnings** after fixing the missing Media3 opt-in.
-- Overall CI: **FAIL** at the required Phase 1 signing-compatibility gate.
-- Original debug key not available in CI; Phase 1 source ZIP contains no keystore.
-- Phone verification: PENDING. **A1 BLOCKED**. No uninstall, data clear or merge.
-
-See `A0_REVIEW_REPORT.md` for actual results and `STAGE_A0.md` for the phone checklist.
+## Historical Phase 1 record retained from the supplied source
 
 ## Phase 1 — first CI run
 

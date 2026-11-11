@@ -1,3 +1,14 @@
+# Current owner install target: fresh A0 installation
+
+Phase 1 was uninstalled by the owner. Fresh-install CI now passes with the pinned
+A0 debug key; the old Phase 1 key is not required for this new installation.
+Package identity remains `com.vortexx.player.debug`. Old app-data restoration is
+not claimed. Use **FRESH_INSTALL_PHONE_CHECKLIST.md** for the current phone test.
+The legacy upgrade instructions below apply only to an existing Phase 1 install.
+
+CI: https://github.com/vortexflash4-coder/vortex-x/actions/runs/43014067553
+**A0 phone acceptance is pending. A1 has not started.**
+
 # Stage A0 review — phone verification gate
 
 A0 is not complete until the Android builds, JVM/allocation gates, signing check,
@@ -88,7 +99,7 @@ allocation measurements and individual command exit codes. Compilation of an
 instrumentation APK does not mean instrumented tests ran. Optional emulator run:
 `./gradlew connectedDebugAndroidTest`.
 
-## Real-phone checklist — all pending until measured
+## Legacy Phase 1-upgrade phone checklist — only for an existing Phase 1 install
 
 Record phone model, Android build, app version, APK SHA-256, CI run URL, and output
 route before testing. Use comfortable listening volume. Keep Phase 1 installed.
