@@ -1,148 +1,179 @@
 # VORTEX X — A0 verification report
 
-Date: 11 November 2026 (Asia/Kolkata). **A0 NOT YET VERIFIED ON PHONE. A1 BLOCKED.**
+11 November 2026 · Stage A0 · **Phone verification pending. A1 blocked.**
 
-Input: `VortexX-A0.zip`, SHA-256
-`f2c0ff916f9f9aeb1fea8b88165e239778463ebd4d944df2fa2e18345a0fb7bd`.
+GitHub repository access is now working. Both Android builds and all 61 JVM tests
+pass in GitHub Actions. **The overall workflow is FAILED because the original
+Phase 1 debug signing key is unavailable and the APK certificate does not match.**
+This is a build-verified APK, not an approved update for the installed Phase 1 app.
 
-## Actual validation results
+## Actual final hosted results
 
-| Gate | Actual result |
+Run: https://github.com/vortexflash4-coder/vortex-x/actions/runs/43005390295
+
+Tested source commit: `0fa5a043209c25033c93e74e716352d9fd80af0b`.
+Review: https://github.com/vortexflash4-coder/vortex-x/pull/1 (draft, not merged).
+
+| Check | Actual result |
 |---|---|
-| `testDebugUnitTest` (local Android Gradle project, JDK 17) | **PASS: 61/61**, 0 failed, 0 skipped; exit 0 |
-| JUnit evidence/allocation gate | **PASS** |
-| `assembleDebug` (local) | **PASS**, exit 0; 23 MB debug APK produced |
-| `assembleDebugAndroidTest` (local) | **PASS**, exit 0; instrumentation APK compiled and packaged, **not executed** |
-| GitHub Actions builds/tests | **IN PROGRESS**: access is now confirmed; see the A0 verification workflow for current run results |
-| Phase 1 signing compatibility | **FAIL** with the supplied A0 debug key |
-| Instrumentation execution / real-phone checks | **NOT RUN**: no attached device |
+| `assembleDebug` | **PASS**, Gradle exit 0; APK produced |
+| `testDebugUnitTest` | **PASS: 61 passed, 0 failed, 0 skipped**, exit 0 |
+| JUnit/allocation report gate | **PASS**; both allocation tests ran |
+| `assembleDebugAndroidTest` | **PASS**, exit 0; compiled and packaged only |
+| `lintDebug` | Task completed; report has **0 errors, 37 warnings** |
+| Package identity/version | `com.vortexx.player.debug`, version code **3** |
+| APK cryptographic signature | Valid v2 signature, verified with build-tools **35.0.0** |
+| Phase 1 certificate compatibility | **FAIL** — actual and expected certificates differ |
+| Full Actions workflow | **FAIL** — required signing gate rejects phone delivery |
+| Emulator/instrumentation execution | **NOT RUN** |
+| Real-phone verification / data-preserving update | **NOT RUN / BLOCKED** |
 
-The full app source was compiled by the Android project before running these
-JVM tests. Local tooling: Temurin 17.0.21, Gradle 8.14.3 (same distribution as the
-wrapper), AGP 8.11.1, Kotlin 2.1.20, compile SDK 36, build-tools 35.0.0, Media3
-1.11.1. Hosted CI evidence is separate and remains absent.
+The report uses Gradle exits, JUnit XML and the signing log. A completed Actions
+step with `continue-on-error` is not itself evidence that its gate passed.
 
 | JVM class | Passed | Failed | Skipped |
 |---|---:|---:|---:|
+| DspChainTest | 13 | 0 | 0 |
+| DspHeadroomTest | 4 | 0 | 0 |
+| DspStatusAndParametersTest | 5 | 0 | 0 |
 | LibraryLogicTest | 10 | 0 | 0 |
 | PoliciesAndFormatTest | 10 | 0 | 0 |
 | SettingsTest | 8 | 0 | 0 |
-| DspChainTest | 13 | 0 | 0 |
-| DspStatusAndParametersTest | 5 | 0 | 0 |
 | VortexAudioProcessorTest | 11 | 0 | 0 |
-| DspHeadroomTest | 4 | 0 | 0 |
 | **Total** | **61** | **0** | **0** |
 
-### Allocation measurements — do not round these to zero
+All 53 original JVM scenarios remain covered, with eight added regression tests.
+Two expectations were updated to match the reviewed behavior: battery PCM keeps
+its adapter configured while copying raw bytes, and preamp attenuation extends
+below −12 dB. No test was ignored or skipped.
 
-Each measurement covers 5,000 input buffers after warm-up. Gate: less than
-1,024 heap bytes across the entire measured loop. The adapter also requires
-no growth in the direct-buffer pool count or bytes.
+## Allocation results and the failed measurement
 
-| Path | Measured heap bytes | Direct-buffer growth | Result |
+The final adapter test warms **5,000 representative input buffers**, then measures
+an unchanged **5,000-input-buffer loop** for each encoding. Inputs alternate
+17/4,097 frames, use eight channels, change cached parameter snapshots and switch
+battery/DSP gates. Large inputs are drained in bounded chunks. The limit remains
+**less than 1,024 heap bytes** across the measured loop, with zero direct-buffer
+pool growth. Missing/disabled counters fail; no assumption skips are used.
+
+| Final measured path | Heap bytes | Direct-buffer growth | Gate |
 |---|---:|---:|---|
-| DSP core | 0 (40-byte counter overhead subtracted) | Not measured separately by core test | PASS |
-| PCM16 adapter | 256 | 0 bytes, 0 buffers | PASS |
-| Float adapter | 240 | 0 bytes, 0 buffers | PASS |
+| DSP core | **0**, after 40-byte counter overhead | Covered through adapter tests | PASS |
+| PCM16 adapter | **256** | **0 bytes / 0 buffers** | PASS |
+| Float adapter | **0** | **0 bytes / 0 buffers** | PASS |
 
-These are JVM measurements, not an assertion of universally zero allocation.
-The small nonzero adapter counts were not attributed to a particular JVM site.
-Adapter loops process eight-channel signal data, alternate 17/4,097-frame inputs,
-change parameter snapshots and switch battery/DSP gates. Hardware/Android
-profiling remains pending. No allocation test was skipped or disabled.
+An earlier hosted run **failed**: the PCM16 adapter measured **1,144 bytes** and
+the suite finished **60 passed, 1 failed, 0 skipped**. Its XML and logs are retained
+in the evidence bundle. The earlier warm-up ran only one constant DSP setting;
+it did not warm the short-input, bulk-copy/battery or parameter-transition paths
+used during measurement. Warm-up now exercises the measured pattern. **The
+measured workload, threshold and direct-buffer assertions were not weakened.**
+The exact allocation class/site for that 1,144-byte sample was not profiled.
+These are steady-state HotSpot JVM measurements, not a cold-start or Android
+allocation-free guarantee. Real-device profiling remains pending.
 
-### DSP measurements
+The earlier local run passed 61/61 with core **0**, PCM16 **256**, float **240**
+heap bytes and zero direct-buffer growth. Those local results remain in the
+history; they are not substituted for the final hosted measurements.
 
-An earlier independent Kotlin/JUnit run passed 16 DSP-core tests. The final
-Android-project JVM suite above includes all core tests plus the added burst
-regression. The +12 dB ten-band response recommended **−19.5 dB** preamp at
-44.1, 48 and 96 kHz. Tested near-full-scale tones at centres/between bands
-produced **zero pre-ceiling clips** with that headroom. The previous largest-band
-rule clips in the adjacent-boost regression; combined headroom passes. The
-sample ceiling also contains multitone bursts and changing gain settings.
+## Exact source and CI fixes
 
-### Built APK identity
+- `VortexAudioProcessor`: fixed **8,192-float** scratch storage and **32,768-byte**
+  direct output capacity reserved during flush. Each call consumes at most
+  **1,024 complete frames**. There is no dynamic scratch resize or output-buffer
+  growth in the processing loop; pending output is not overwritten.
+- Battery preference: the volatile gate is checked each PCM chunk. Battery mode
+  copies raw PCM without EQ/preamp processing, even if hardware offload is not
+  supported and the existing PCM sink stays open. The adapter stays configured,
+  allowing DSP to resume without waiting for output reconfiguration. Re-entry
+  clears stale filter state and fades from dry.
+- Status: configured PCM availability is distinguished from active processing;
+  battery PCM fallback is shown as bypassed. Hardware offload is reported only
+  when Media3 actually opens an offloaded output.
+- Headroom: scan the **combined ten-filter response**, including overlap, at the
+  active sample rate; add **1 dB** margin and round toward more attenuation.
+  The preamp floor extends to **−48 dB**, with existing stored values retained.
+- Clipping: a sample ceiling protects active PCM16/float output, while clip counts
+  record pre-ceiling overs. The +12 dB ten-band tests recommend **−19.5 dB** at
+  44.1/48/96 kHz and measured zero pre-ceiling clips for the tested near-full-scale
+  tones with that headroom. Burst and changing-gain regressions also pass.
+- EQ layout: horizontally scrollable bank with **56 dp-wide** faders and 168 dp
+  tracks. TalkBack range controls remain present; unavailable bands are disabled.
+  The compact-layout accessibility test compiles; it has not executed on a device.
+- `PlaybackService`: add the required Media3 opt-in annotation to the output-mode
+  observer. This clears all **8 lint opt-in errors** found in the first hosted
+  report without changing playback logic. **37 warnings remain** in lint.
+- CI: build directly from reviewed `a0/` source, attempt both APK builds and all
+  JVM tests, reject missing/skipped allocation evidence, preserve raw reports,
+  and keep signing compatibility as a required gate. The previous main workflow
+  stopped with exit **127** because its ZIP lacked `ci-build.sh`.
+- Signing diagnostics: use stable build-tools **35.0.0**, record public certificate
+  output and distinguish an unreadable digest from a mismatch. The first hosted
+  verifier selected a tool that produced no parsed digest; its blocked result
+  is retained. The final tool verifies and reports the certificate correctly.
 
-- APK SHA-256: `ad8a50a171df56c6c602e7279c1750206bc8c50b4af332b77c6322dea00213fb`
-- Application ID: `com.vortexx.player.debug`; version code **3**.
-- Candidate signer: `0011cfbf999ddb460d382f89a839a1b5e286dbd515cbe5965500ec4cce115c9f`.
-- Installed baseline signer: `84970dbb7b74f0f54fee68811e4bedd429393e0667ccb1f82752cc8be6d3706f`.
-- Verification script exit **1**, correctly rejecting the mismatch. This APK is
-  **build-only**, not a verified phone update. Do not uninstall Phase 1 to use it.
+## APK identity and signing blocker
 
-## Current external blockers
+Build-only APK: `VortexX-A0-build-only.apk` (23,757,709 bytes).
 
-1. GitHub access is confirmed for `vortexflash4-coder/vortex-x`. The reviewed
-   source is being committed under `a0/` on `codex/a0-verification-20261111` with
-   a dedicated A0 verification workflow. The earlier repository-access blocker
-   is resolved. Current Actions outcomes must be read from the workflow run.
-2. The supplied Phase 1 APK signer differs from the A0 ZIP's bundled debug key.
-   An ordinary update that preserves installed data requires the original Phase 1
-   DEBUG private key. It was not present in either source ZIP examined. The
-   inaccessible repository's secrets/caches have not been inspected.
-3. There is no connected real phone. Device behavior and performance remain
-   unverified. No uninstall, data-clear, or phone update has been performed.
+SHA-256: `f62c935d51cf5ca5bccc957fc1e7162f7478b28a3ca29427a1ef67a514862f36`.
 
-## Failures found and corrected during verification
+| Certificate | SHA-256 |
+|---|---|
+| Supplied Phase 1 APK | `84970dbb7b74f0f54fee68811e4bedd429393e0667ccb1f82752cc8be6d3706f` |
+| Current A0 build | `0011cfbf999ddb460d382f89a839a1b5e286dbd515cbe5965500ec4cce115c9f` |
 
-- Initial full unit-test compilation failed because the new direct-buffer
-  measurement imported JVM management APIs absent from Android's compile SDK.
-  The test now accesses the same counters through reflection, preserving both
-  measurements and thresholds. The failed log is retained in the evidence.
-- All 53 original JVM tests remain covered. Two expectations were deliberately
-  updated: battery PCM keeps the adapter configured while copying raw bytes, and
-  preamp attenuation now extends below −12 dB. Eight regression tests are added;
-  no test uses an assumption skip for the allocation gate.
+The original debug key was not restored in CI. A separate read-only inventory of
+`VortexX-phase1-reviewed.zip` found **zero `.keystore`, `.jks`, `.p12` or `.pfx`
+files**. Inventory run: https://github.com/vortexflash4-coder/vortex-x/actions/runs/43006141200.
+The private key was also absent from the earlier source ZIPs examined. This does
+not establish whether the owner retained a copy elsewhere.
 
-## Exact fixes
+A normal update preserving installed data needs the **original Phase 1 debug
+private key**. Creating another key does not solve this mismatch. **Do not
+uninstall Phase 1 or clear app data to install this build-only APK.**
 
-See `STAGE_A0.md` for implementation detail and limitations:
+CI accepts that original debug key through `VORTEX_PHASE1_DEBUG_KEYSTORE_BASE64`
+or the existing `VORTEX_DEBUG_KEYSTORE_B64` secret. Debug-only passwords/alias
+have their own variables. Release signing remains unconfigured. No production
+credentials are loaded, no key contents are uploaded, and temporary key files
+are removed. The old create-key workflow was not invoked.
 
-- Fixed-size PCM scratch/output buffers and bounded 1,024-frame processing.
-- Immediate next-chunk raw PCM battery bypass, including offload fallback and
-  initially saved battery mode; return to DSP without waiting for reconfigure.
-- Combined-response Auto headroom with 1 dB margin and a −48 dB preamp floor.
-- Sample safety ceiling for active float/PCM16 output; pre-ceiling clip counting.
-- Horizontally scrollable 56 dp EQ faders with TalkBack range controls.
-- Non-skippable DSP and adapter allocation gates, including direct-buffer growth.
-- CI reports actual XML totals and fails on skipped/missing allocation tests.
-- Dedicated debug signing overrides and a Phase 1 certificate/package gate.
+## Phase 1 preservation and real-device gate
 
-## Preserved Phase 1 scope
+Debug identity remains `com.vortexx.player.debug`; release identity remains
+`com.vortexx.player`. Version code is **3** / `0.2.1-a0-review-debug`. Manifest and
+all nine data-layer files are unchanged from the supplied A0 source. Room schema,
+DataStore names, preference keys, permissions and existing music/video features
+were not migrated or removed by this review. Runtime regression checks remain
+part of phone verification. Main is unchanged; the PR is still a draft.
 
-Debug package remains `com.vortexx.player.debug`; release identity remains
-`com.vortexx.player`. Version code rises to 3 for the reviewed A0 build. Manifest
-and all nine data-layer files match the supplied A0 source byte for byte. Room
-schema, preference keys/store names, media permissions and Phase 1 library/video
-features are not migrated or removed. Runtime regression checks are still needed.
+The full real-device checklist is included as
+`Stage-A0-fixes-and-real-device-checklist.md` in the evidence ZIP and in
+`a0/docs/STAGE_A0.md` in the PR. It covers compatible update/data retention,
+playback/queue/notification controls, bypass with supported and unsupported
+offload, cold-start battery preference, sample-rate changes, compact controls
+and TalkBack, routing, 30-minute playback/load/underruns, settings persistence
+and existing video behavior.
 
-Production signing remains unconfigured; no production credentials are used.
-The bundled key is an isolated debug/build fallback and is not update-compatible
-with the supplied Phase 1 APK.
+Already queued AudioTrack samples delay audible changes. An immediate raw
+battery switch can click on a large wet/dry difference; this needs phone testing.
+The separate user bypass uses its 20 ms crossfade. Headroom is a one-shot
+steady-state estimate: reapply after EQ/sample-rate changes. The sample ceiling
+is hard saturation, not a limiter or a true-peak guarantee. Configure/flush can
+allocate. Video DSP, battery savings, long playback and hardware-specific
+behavior are not verified by these JVM/build results.
 
-## Non-failing build warnings
-
-The Kotlin test compile reports a nullable reflection-return type warning in the
-existing allocation helper; the runtime counter is checked and both allocation
-tests passed. The debug APK packages `libandroidx.graphics.path.so` and
-`libdatastore_shared_counter.so` without stripping debug symbols. Neither warning
-failed assembly. Lint was not run locally. These logs are retained in evidence.
-
-## Remaining limitations and decision
-
-An app build is not a phone verification. Core allocation measurements cover the
-measured hot paths after warm-up, not all Media3/Android allocations or device
-GC. Filter configure/flush can allocate. Hardware offload support, audible switch
-delay/clicks, TalkBack behavior, long playback, battery impact and underruns need
-the device checklist. The sample ceiling is hard clipping protection, not a
-limiter or true-peak guarantee. Auto headroom is one-shot and must be reapplied
-after EQ/sample-rate changes. Music DSP only; video functionality is retained
-without adding video DSP.
-
-Complete the real-device checklist in `STAGE_A0.md` before authorizing A1.
+**A0 stays blocked on compatible signing and phone verification. A1 has not
+started.**
 
 ## Source provenance
 
-Build-relevant source digest: `90b5a088c6414923ac001743a26c5d4f373aed5bcec3a34b8b167daded790e78`.
-File hashes and APK hash are included in `provenance.json` in the evidence ZIP.
-The source ZIP contains the reviewed code and updated CI workflows.
+Latest tested application/test source: commit
+`0fa5a043209c25033c93e74e716352d9fd80af0b`.
+Build-relevant source digest: `84338df670ea6fe11c7495ce165ed8805549eed9d07e9eddf3b2607d9b5e4949`.
+
+The evidence ZIP contains per-file hashes, final CI XML/logs/lint reports,
+allocation-failure history, Phase 1 signing inventory, and the compiled
+instrumentation APK explicitly labeled **NOT RUN**. Current source is in draft
+PR #1; earlier source/archive and local validation are historical snapshots.

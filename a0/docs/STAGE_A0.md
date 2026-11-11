@@ -114,3 +114,7 @@ route before testing. Use comfortable listening volume. Keep Phase 1 installed.
 
 Gate outcome: **PENDING**. Record pass/fail per row, measurements and any unsupported
 hardware scenario explicitly. A1 cannot begin until owner confirms phone A0.
+
+## Hosted verification update
+
+The final CI run passed 61 JVM tests with 0 skipped, both APK assemblies, and lint with 0 errors / 37 warnings. The full job fails at Phase 1 signing compatibility. Adapter allocation warm-up now exercises 5,000 inputs covering the same paths as the unchanged 5,000-input measured loop; the <1,024-byte threshold and direct-buffer assertions are unchanged. Final heap measurements: core 0, PCM16 256, float 0 bytes. The earlier 1,144-byte failure is retained in the review evidence. These results describe warmed JVM processing, not Android cold-start allocation behavior. No phone verification or A1 work has started.

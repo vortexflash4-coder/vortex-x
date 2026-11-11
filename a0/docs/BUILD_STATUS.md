@@ -11,22 +11,22 @@ Last updated: 2026-11-11 (Stage A0 review)
 | **Unit-tested** | JVM tests passed in the explicitly named environment (`testDebugUnitTest`); no skipped allocation gates. |
 | **Device-tested** | The owner confirmed it on a real phone. |
 
-## Stage A0 review (0.2.1-a0-review) — phone gate pending
+## Stage A0 review — hosted build/tests pass, phone gate blocked
 
-Full evidence, limitations and exact changes: [`A0_REVIEW_REPORT.md`](A0_REVIEW_REPORT.md).
-Real-device checklist and signing requirements: [`STAGE_A0.md`](STAGE_A0.md).
+- GitHub Actions: https://github.com/vortexflash4-coder/vortex-x/actions/runs/43005390295
+- Tested source: `0fa5a043209c25033c93e74e716352d9fd80af0b`.
+- `assembleDebug`: PASS. `assembleDebugAndroidTest`: PASS, compiled only.
+- JVM: **61 passed, 0 failed, 0 skipped**, including both allocation gates.
+- Final heap measurements: core **0**, PCM16 **256**, float **0** bytes per
+  5,000 measured input buffers; direct growth **0**. Representative warm-up is
+  5,000 inputs; the <1,024-byte gate is unchanged. The earlier 1,144-byte failure
+  is retained in the evidence and review report.
+- Lint: **0 errors, 37 warnings** after fixing the missing Media3 opt-in.
+- Overall CI: **FAIL** at the required Phase 1 signing-compatibility gate.
+- Original debug key not available in CI; Phase 1 source ZIP contains no keystore.
+- Phone verification: PENDING. **A1 BLOCKED**. No uninstall, data clear or merge.
 
-- Local Android-project JVM suite: **61 passed, 0 failed, 0 skipped**.
-- Core allocation: **0 bytes** / 5,000 buffers; PCM16 adapter **256 bytes**;
-  float adapter **240 bytes**; direct-buffer growth **0**. Both gates pass the
-  documented <1,024-byte JVM threshold. These are not device measurements.
-- Local `assembleDebug`: **PASS**, exit 0.
-- Local `assembleDebugAndroidTest`: **PASS**, exit 0; compilation/packaging only.
-- GitHub Actions: **NOT RUN**. Account connected, but repository access is absent.
-- Phase 1 update compatibility: **FAIL** with the bundled A0 debug key. The
-  original Phase 1 debug key is required; do not uninstall or clear app data.
-- Instrumentation execution and real-phone verification: **NOT RUN**.
-- A1: **BLOCKED** pending phone verification.
+See `A0_REVIEW_REPORT.md` for actual results and `STAGE_A0.md` for the phone checklist.
 
 ## Phase 1 — first CI run
 
