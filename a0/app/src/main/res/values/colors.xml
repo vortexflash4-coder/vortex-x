@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mirrors ui/designsystem/theme/Color.kt for XML-only surfaces (window, icon). -->
+    <color name="vortex_background">#FF000000</color>
+    <color name="vortex_surface">#FF0B0C10</color>
+    <color name="vortex_accent">#FFE71938</color>
+    <color name="vortex_text_primary">#FFFFFFFF</color>
+    <color name="ic_launcher_background">#FF000000</color>
+</resources>
