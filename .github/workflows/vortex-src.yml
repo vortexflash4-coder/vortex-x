@@ -1,0 +1,71 @@
+# VORTEX X: build from source pushed to a src/* branch (no zip upload needed).
+# Uses the same pinned debug key as vortex.yml (Actions cache, else the backup secret).
+# Never creates a new key. Results go to the ci-results branch; the APK is a run artifact.
+name: VORTEX X source build
+on:
+  push:
+    branches: ['src/**']
+permissions:
+  contents: write
+concurrency:
+  group: vx-src-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - id: keyrestore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.vortex-key
+          key: vortex-debug-key-v1
+      - id: run
+        env:
+          KEY_B64: ${{ secrets.VORTEX_DEBUG_KEYSTORE_B64 }}
+          HIT: ${{ steps.keyrestore.outputs.cache-hit }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: |
+          key="$HOME/.vortex-key/vortex-debug.keystore"
+          if [ "$HIT" != true ] && [ -n "$KEY_B64" ]; then
+            mkdir -p ~/.vortex-key
+            printf '%s' "$KEY_B64" | tr -d ' \r\n\t' | base64 -d > "$key"
+          fi
+          unset KEY_B64
+          if ! keytool -list -keystore "$key" -storepass android -alias androiddebugkey > /dev/null 2>&1; then
+            echo "::error::Pinned debug key not found (cache and secret empty). Not building with a new key."
+            exit 1
+          fi
+          export VORTEX_DEBUG_KEYSTORE="$key" SIGNING=cached
+          echo "🔑 **Signing: same CI debug key as before**" >> "$GITHUB_STEP_SUMMARY"
+          echo "Built from branch \`$REF\` commit \`${SHA:0:7}\`" >> "$GITHUB_STEP_SUMMARY"
+          d="$(dirname "$(find "$PWD" -maxdepth 3 -name gradlew | head -n 1)")"
+          echo "dir=$d" >> "$GITHUB_OUTPUT"
+          rc=0
+          bash "$d/.github/scripts/ci-build.sh" "$d" "$PWD/ci-logs" || rc=$?
+          mkdir -p ci-logs/tests
+          cp "$GITHUB_STEP_SUMMARY" ci-logs/summary.md || true
+          cp "$d"/app/build/test-results/testDebugUnitTest/*.xml ci-logs/tests/ 2>/dev/null || true
+          exit $rc
+      - if: ${{ always() && steps.run.outputs.assemble == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vortex-x-debug-apk
+          path: ${{ steps.run.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+      - if: ${{ always() && steps.run.outputs.dir != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.run_number }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/res" && cp -r ci-logs/. "$RUNNER_TEMP/res/" && cd "$RUNNER_TEMP/res"
+          git init -q && git add -A
+          git -c user.name=vortex-ci -c user.email=vortex-ci@users.noreply.github.com commit -qm "CI source run $RUN"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" HEAD:refs/heads/ci-results
