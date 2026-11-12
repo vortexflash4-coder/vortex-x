@@ -1,21 +1,26 @@
 # VORTEX X phone build: upload a project zip -> debug APK.
-# Signing: CI creates one debug key on the first build and keeps it in this repository's
-# GitHub Actions cache (never committed, never printed). Every later APK is signed with
-# the same key, so it installs over the previous one and keeps app data. A weekly run
-# reads the cache so GitHub does not expire it.
-# Each build also pushes its summary, logs and test reports to the branch ci-results
-# (no APK, no key), so results can be read without screenshots.
+# Signing: one debug key, kept in this repository's Actions cache and backed up in the
+# repository secret VORTEX_DEBUG_KEYSTORE_B64 (Run workflow -> task export-signing-key prints it
+# once for copying). If the cache is gone the secret restores it. If both are gone and a pinned
+# certificate exists (.github/signing/expected-debug-cert-sha256.txt) the build stops instead of
+# making a new key, because an APK with a new key cannot update the installed app.
+# Each build pushes its summary, logs and test reports to the branch ci-results (no APK, no key).
 name: VORTEX X build
 on:
   push:
     paths: ['**.zip']
   workflow_dispatch:
+    inputs:
+      task:
+        type: choice
+        options: [build, export-signing-key]
+        default: build
   schedule:
     - cron: '23 4 * * 1'
 permissions:
   contents: write
 concurrency:
-  group: vx-${{ github.event_name == 'schedule' && 'keepalive' || 'build' }}
+  group: vx-${{ github.event_name == 'schedule' && 'keepalive' || inputs.task || 'build' }}
   cancel-in-progress: false
 jobs:
   keepalive:
@@ -27,8 +32,39 @@ jobs:
         with:
           path: ~/.vortex-key
           key: vortex-debug-key-v1
+  export-key:
+    if: ${{ inputs.task == 'export-signing-key' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.vortex-key
+          key: vortex-debug-key-v1
+          fail-on-cache-miss: true
+      - run: |
+          k="$HOME/.vortex-key/vortex-debug.keystore"
+          sha="$(keytool -list -v -keystore "$k" -storepass android -alias androiddebugkey | grep -m1 'SHA256:' | sed 's/.*SHA256: *//' | tr -d ':' | tr 'A-F' 'a-f')"
+          {
+            echo "## Debug signing key backup"
+            echo ""
+            echo "1. Tap the copy button on the block below."
+            echo "2. Settings -> Secrets and variables -> Actions -> New repository secret. Name: VORTEX_DEBUG_KEYSTORE_B64. Paste. Add secret."
+            echo "3. Delete this run (... -> Delete workflow run)."
+            echo ""
+            echo '```'
+            base64 -w 0 "$k"
+            echo ""
+            echo '```'
+            echo ""
+            echo "Certificate SHA-256 (public): \`$sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
   run:
-    if: ${{ github.event_name != 'schedule' }}
+    if: ${{ github.event_name != 'schedule' && (inputs.task || 'build') == 'build' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -45,28 +81,42 @@ jobs:
         with:
           path: ~/.vortex-key
           key: vortex-debug-key-v1
-      - id: keymake
+      - id: keysecret
         if: ${{ steps.keyrestore.outputs.cache-hit != 'true' }}
+        env:
+          KEY_B64: ${{ secrets.VORTEX_DEBUG_KEYSTORE_B64 }}
         run: |
+          if [ -n "$KEY_B64" ]; then
+            mkdir -p ~/.vortex-key
+            printf '%s' "$KEY_B64" | tr -d ' \r\n\t' | base64 -d > ~/.vortex-key/vortex-debug.keystore
+            echo "restored=true" >> "$GITHUB_OUTPUT"
+          fi
+      - id: keymake
+        if: ${{ steps.keyrestore.outputs.cache-hit != 'true' && steps.keysecret.outputs.restored != 'true' }}
+        run: |
+          if [ -f .github/signing/expected-debug-cert-sha256.txt ]; then
+            echo "::error::The pinned debug key is missing (no Actions cache, no VORTEX_DEBUG_KEYSTORE_B64 secret). Not creating a new key: its APK could not update the installed app."
+            exit 1
+          fi
           mkdir -p ~/.vortex-key
           keytool -genkeypair -keystore ~/.vortex-key/vortex-debug.keystore -storetype PKCS12 -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=VORTEX X Debug,O=VORTEX X,C=IN"
-      - if: ${{ steps.keymake.outcome == 'success' }}
+      - if: ${{ steps.keymake.outcome == 'success' || steps.keysecret.outputs.restored == 'true' }}
         uses: actions/cache/save@v4
         with:
           path: ~/.vortex-key
           key: vortex-debug-key-v1
       - id: run
         env:
-          NEW_KEY: ${{ steps.keymake.outcome == 'success' }}
+          KEY_SOURCE: ${{ steps.keymake.outcome == 'success' && 'new' || steps.keysecret.outputs.restored == 'true' && 'secret' || 'cache' }}
         run: |
           key="$HOME/.vortex-key/vortex-debug.keystore"
           if keytool -list -keystore "$key" -storepass android -alias androiddebugkey > /dev/null 2>&1; then
             export VORTEX_DEBUG_KEYSTORE="$key" SIGNING=cached
-            if [ "$NEW_KEY" = true ]; then
-              echo "🔑 **Signing: new CI debug key created** and kept in the Actions cache (not in the repository). Uninstall the Phase 1 app once before installing this APK; from now on APKs install over each other and keep app data." >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo "🔑 **Signing: same CI debug key as before** (Actions cache). This APK installs over the previous one and keeps app data." >> "$GITHUB_STEP_SUMMARY"
-            fi
+            case "$KEY_SOURCE" in
+              new) echo "🔑 **Signing: new CI debug key created** (Actions cache). Back it up: Run workflow -> task export-signing-key." >> "$GITHUB_STEP_SUMMARY" ;;
+              secret) echo "🔑 **Signing: debug key restored from the repository secret** (cache was empty; cache refilled)." >> "$GITHUB_STEP_SUMMARY" ;;
+              *) echo "🔑 **Signing: same CI debug key as before** (Actions cache)." >> "$GITHUB_STEP_SUMMARY" ;;
+            esac
           fi
           zip="$(git log -1 --diff-filter=AM --name-only --pretty=format: -- '*.zip' | head -n 1)"
           [ -n "$zip" ] || zip="$(git ls-files '*.zip' | head -n 1)"
