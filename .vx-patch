@@ -1,0 +1,179 @@
+--- a/.github/scripts/ci-publish.sh
++++ b/.github/scripts/ci-publish.sh
+@@ -44 +44,2 @@
+-ASSET="$(api -X POST -H "Content-Type: application/vnd.android.package-archive" --data-binary @"$APK" "$UPLOAD?name=$NAME")"
++# --upload-file streams the APK; --data-binary would first read all of it into memory.
++ASSET="$(api -X POST -H "Content-Type: application/vnd.android.package-archive" --upload-file "$APK" "$UPLOAD?name=$NAME")"
+@@ -54,0 +56,5 @@
++# A large APK is delivered by this release only: as an Actions artifact it would use up the
++# repository's artifact storage. ("assemble" is what the workflow's artifact step looks at.)
++if [ -n "${GITHUB_OUTPUT:-}" ] && [ "$(wc -c < "$APK")" -gt 104857600 ]; then
++  echo "assemble=published" >> "$GITHUB_OUTPUT"
++fi
+--- a/.github/scripts/ci-smoke.sh
++++ b/.github/scripts/ci-smoke.sh
+@@ -20,0 +21,4 @@
++if [ -f "${GITHUB_WORKSPACE:-.}/.vx-nosmoke" ]; then
++  say "Skipped: switched off for this build (.vx-nosmoke)."
++  exit 2
++fi
+@@ -35 +39,5 @@
+-IMAGE="system-images;android-34;default;x86_64"
++# avdmanager and the emulator look in different default folders on CI; give both the same one.
++export ANDROID_AVD_HOME="$HOME/.android/avd"
++mkdir -p "$ANDROID_AVD_HOME"
++# Google APIs image: it can run the app's ARM native libraries by translation (the APK has no x86 ones).
++IMAGE="system-images;android-34;google_apis;x86_64"
+--- a/.github/scripts/ci-summary.sh
++++ b/.github/scripts/ci-summary.sh
+@@ -26 +26,4 @@
+-outcome = {k: (os.environ.get(k) or "skipped") for k in ("FONTS", "FFMPEG", "ASSEMBLE", "UNIT", "ANDROIDTEST", "LINT", "SMOKE")}
++outcome = {k: (os.environ.get(k) or "skipped") for k in ("FONTS", "MODELS", "FFMPEG", "ASSEMBLE", "UNIT", "ANDROIDTEST", "LINT", "SMOKE")}
++# An older build script does not report the models step; the list it leaves behind does.
++if outcome["MODELS"] == "skipped" and os.path.exists(os.path.join(project, "app/build/ai-test/models.txt")):
++    outcome["MODELS"] = "success"
+@@ -42,0 +46 @@
++    ("MODELS", "AI models download (`ci-models.sh`; a failure builds without AI)"),
+@@ -52,0 +57,7 @@
++models = os.path.join(project, "app/build/ai-test/models.txt")
++if os.path.exists(models):
++    rows = [l.split() for l in open(models) if l.strip()]
++    parts = [f"{r[0]} {int(r[1]) / 1048576:.1f} MB" for r in rows if len(r) >= 2 and r[0] != "total"]
++    total = next((int(r[1]) for r in rows if r[0] == "total"), 0)
++    w(f"AI models packaged in the APK: {', '.join(parts)}; total {total / 1048576:.1f} MB.")
++    w("")
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -21,2 +21,2 @@
+-        versionCode = 6
+-        versionName = "0.4.0-m2"
++        versionCode = 7
++        versionName = "0.5.0-ai"
+@@ -24,0 +25,8 @@
++        // Phones only. Emulator-only ABIs (x86, x86_64) would add about 25 MB of native
++        // libraries (ONNX Runtime, FFmpeg) that no phone uses.
++        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
++    }
++
++    androidResources {
++        // The AI models are memory-mapped straight from the APK, which needs them stored as-is.
++        noCompress += listOf("onnx")
+@@ -133,0 +142,4 @@
++    // On-device AI (karaoke and lyrics): ONNX Runtime. The desktop build of the same version
++    // lets the JVM unit tests run the real models on the CI machine.
++    implementation(libs.onnxruntime.android)
++    testImplementation(libs.onnxruntime.jvm)
+--- a/app/src/main/java/com/vortexx/player/feature/diagnostics/DiagnosticsScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/diagnostics/DiagnosticsScreen.kt
+@@ -249 +249 @@
+-                                f.pack -> "Pack (phone cannot)"
++                                f.pack -> "Added by the pack"
+@@ -257 +257 @@
+-                                    !f.phone -> VortexColors.Accent
++                                    !f.phone -> VortexColors.Success
+--- a/app/src/main/java/com/vortexx/player/feature/nowplaying/NowPlayingScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/nowplaying/NowPlayingScreen.kt
+@@ -2,0 +3,5 @@
++import com.vortexx.player.playback.NowPlaying
++import androidx.compose.material.icons.rounded.AutoAwesome
++import com.vortexx.player.ai.lyrics.Lrc
++import com.vortexx.player.ai.lyrics.LyricLine
++import com.vortexx.player.ai.AiStore
+@@ -125,0 +131 @@
++    private val aiStore: AiStore,
+@@ -126,0 +133,7 @@
++    /** Changes when AI lyrics are written or deleted. */
++    val aiChanges: StateFlow<Int> = aiStore.changes
++
++    /** AI-written lyrics for what is playing (the song or its karaoke track); empty when there are none. */
++    fun lyrics(nowPlaying: NowPlaying): List<LyricLine> =
++        AiStore.keyFor(nowPlaying.songId, nowPlaying.contentUri)?.let { aiStore.readLyrics(it) } ?: emptyList()
++
+@@ -179,0 +193 @@
++    onOpenAiStudio: () -> Unit,
+@@ -247,0 +262 @@
++                    onOpenAiStudio = onOpenAiStudio,
+@@ -362,0 +378 @@
++    onOpenAiStudio: () -> Unit,
+@@ -430,0 +447,7 @@
++        val aiChanges by viewModel.aiChanges.collectAsStateWithLifecycle()
++        val lyricLines = remember(nowPlaying.mediaId, aiChanges) { viewModel.lyrics(nowPlaying) }
++        if (lyricLines.isNotEmpty()) {
++            Spacer(Modifier.height(VortexSpacing.lg))
++            LyricsStrip(lines = lyricLines, positionMs = position.positionMs, onClick = onOpenAiStudio)
++        }
++
+@@ -443,0 +467 @@
++            ActionItem(Icons.Rounded.AutoAwesome, "AI", lyricLines.isNotEmpty(), onOpenAiStudio, Modifier.weight(1f))
+@@ -583,0 +608,34 @@
++    }
++}
++
++/** The lyric line being sung and the one after it (AI-written lyrics, when the song has them). */
++@Composable
++private fun LyricsStrip(lines: List<LyricLine>, positionMs: Long, onClick: () -> Unit) {
++    val index = Lrc.indexAt(lines, positionMs)
++    val shape = RoundedCornerShape(16.dp)
++    Column(
++        Modifier
++            .fillMaxWidth()
++            .clip(shape)
++            .background(VortexColors.Card)
++            .border(1.dp, VortexColors.Divider, shape)
++            .clickable(role = Role.Button, onClickLabel = "Open AI Studio", onClick = onClick)
++            .padding(horizontal = VortexSpacing.md, vertical = VortexSpacing.sm),
++    ) {
++        Text("LYRICS · WRITTEN BY AI", style = InstrumentText.label.copy(color = VortexColors.Accent))
++        Text(
++            if (index >= 0) lines[index].text else "…",
++            style = MaterialTheme.typography.titleMedium,
++            maxLines = 2,
++            overflow = TextOverflow.Ellipsis,
++        )
++        val following = lines.getOrNull(index + 1)
++        if (following != null) {
++            Text(
++                following.text,
++                style = MaterialTheme.typography.bodySmall,
++                color = VortexColors.TextSecondary,
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis,
++            )
++        }
+--- a/app/src/main/java/com/vortexx/player/feature/you/YouScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/you/YouScreen.kt
+@@ -2,0 +3,2 @@
++import com.vortexx.player.ui.navigation.AiStudioRoute
++import androidx.compose.material.icons.rounded.AutoAwesome
+@@ -122,0 +125 @@
++    HubEntry("AI Studio", "Karaoke track and lyrics, made on this phone", Icons.Rounded.AutoAwesome, AiStudioRoute),
+--- a/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt
++++ b/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt
+@@ -2,0 +3 @@
++import com.vortexx.player.ui.navigation.AiStudioRoute
+@@ -103 +104 @@
+-            YouRoute::class, SettingsRoute::class, StudioRoute::class, DiagnosticsRoute::class, ControlCenterRoute::class, QueueRoute::class,
++            YouRoute::class, SettingsRoute::class, StudioRoute::class, AiStudioRoute::class, DiagnosticsRoute::class, ControlCenterRoute::class, QueueRoute::class,
+--- a/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt
++++ b/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt
+@@ -24,0 +25,3 @@
++/** AI Studio: karaoke track and lyrics for the current song, made on the phone. */
++@Serializable data object AiStudioRoute
++
+--- a/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
++++ b/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
+@@ -2,0 +3 @@
++import com.vortexx.player.feature.ai.AiStudioScreen
+@@ -85,0 +87 @@
++                onOpenAiStudio = { navController.navigate(AiStudioRoute) { launchSingleTop = true } },
+@@ -154,0 +157,3 @@
++        }
++        composable<AiStudioRoute> {
++            AdaptiveWidth(VortexWidths.Reading) { AiStudioScreen(onBack = back) }
+--- a/gradle/libs.versions.toml
++++ b/gradle/libs.versions.toml
+@@ -19,0 +20 @@
++onnxruntime = "1.20.0"
+@@ -48,0 +50,2 @@
++onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
++onnxruntime-jvm = { group = "com.microsoft.onnxruntime", name = "onnxruntime", version.ref = "onnxruntime" }
