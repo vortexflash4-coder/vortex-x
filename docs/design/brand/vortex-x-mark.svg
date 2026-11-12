@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="VORTEX X mark">
+  <!-- Draft brand mark (design milestone): two interlocking ribbon arms forming a V,
+       with a small negative-space play aperture. Colours: Signature Red #F43F46 family. -->
+  <defs>
+    <linearGradient id="armBack" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#C41A26"/>
+      <stop offset="1" stop-color="#8E0F19"/>
+    </linearGradient>
+    <linearGradient id="armFront" x1="1" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#FF5A60"/>
+      <stop offset="0.55" stop-color="#F43F46"/>
+      <stop offset="1" stop-color="#D42A33"/>
+    </linearGradient>
+  </defs>
+  <!-- Left (back) ribbon -->
+  <polygon points="14,34 76,34 116,146 100,180" fill="url(#armBack)"/>
+  <!-- Right (front) ribbon, folds over the left one -->
+  <polygon points="186,26 124,26 80,126 100,180" fill="url(#armFront)"/>
+  <!-- Fold shading where the ribbons cross -->
+  <polygon points="80,126 100,180 92,138" fill="#000" fill-opacity="0.18"/>
+  <!-- Play aperture (negative space) -->
+  <polygon points="88,84 88,112 111,98" fill="#08090B"/>
+</svg>
