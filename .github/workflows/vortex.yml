@@ -1,23 +1,34 @@
-# VORTEX X phone build. Upload a project zip -> APK. Run workflow -> create-signing-key once.
-# Each build also force-pushes its summary, logs and test reports to the branch ci-results
-# (no APK, no keys), so the results can be read without screenshots.
+# VORTEX X phone build: upload a project zip -> debug APK.
+# Signing: CI creates one debug key on the first build and keeps it in this repository's
+# GitHub Actions cache (never committed, never printed). Every later APK is signed with
+# the same key, so it installs over the previous one and keeps app data. A weekly run
+# reads the cache so GitHub does not expire it.
+# Each build also pushes its summary, logs and test reports to the branch ci-results
+# (no APK, no key), so results can be read without screenshots.
 name: VORTEX X build
 on:
   push:
     paths: ['**.zip']
   workflow_dispatch:
-    inputs:
-      task:
-        type: choice
-        options: [build, create-signing-key]
-        default: build
+  schedule:
+    - cron: '23 4 * * 1'
 permissions:
   contents: write
 concurrency:
-  group: vx-${{ inputs.task || 'build' }}
-  cancel-in-progress: true
+  group: vx-${{ github.event_name == 'schedule' && 'keepalive' || 'build' }}
+  cancel-in-progress: false
 jobs:
+  keepalive:
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.vortex-key
+          key: vortex-debug-key-v1
   run:
+    if: ${{ github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -28,19 +39,34 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - if: ${{ inputs.task != 'create-signing-key' }}
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
+      - id: keyrestore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.vortex-key
+          key: vortex-debug-key-v1
+      - id: keymake
+        if: ${{ steps.keyrestore.outputs.cache-hit != 'true' }}
+        run: |
+          mkdir -p ~/.vortex-key
+          keytool -genkeypair -keystore ~/.vortex-key/vortex-debug.keystore -storetype PKCS12 -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=VORTEX X Debug,O=VORTEX X,C=IN"
+      - if: ${{ steps.keymake.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.vortex-key
+          key: vortex-debug-key-v1
       - id: run
         env:
-          TASK: ${{ inputs.task || 'build' }}
-          KEY_B64: ${{ secrets.VORTEX_DEBUG_KEYSTORE_B64 }}
+          NEW_KEY: ${{ steps.keymake.outcome == 'success' }}
         run: |
-          if [ "$TASK" = create-signing-key ]; then
-            k="$RUNNER_TEMP/k.p12"; mkdir -p key
-            keytool -genkeypair -keystore "$k" -storetype PKCS12 -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=VORTEX X Debug,O=VORTEX X,C=IN"
-            base64 -w 0 "$k" > key/VORTEX_DEBUG_KEYSTORE_B64.txt; rm -f "$k"
-            echo "Key ready. Download artifact vortex-debug-key-secret, copy the text into the repository secret VORTEX_DEBUG_KEYSTORE_B64, then delete this run." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          key="$HOME/.vortex-key/vortex-debug.keystore"
+          if keytool -list -keystore "$key" -storepass android -alias androiddebugkey > /dev/null 2>&1; then
+            export VORTEX_DEBUG_KEYSTORE="$key" SIGNING=cached
+            if [ "$NEW_KEY" = true ]; then
+              echo "🔑 **Signing: new CI debug key created** and kept in the Actions cache (not in the repository). Uninstall the Phase 1 app once before installing this APK; from now on APKs install over each other and keep app data." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "🔑 **Signing: same CI debug key as before** (Actions cache). This APK installs over the previous one and keeps app data." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           zip="$(git log -1 --diff-filter=AM --name-only --pretty=format: -- '*.zip' | head -n 1)"
           [ -n "$zip" ] || zip="$(git ls-files '*.zip' | head -n 1)"
@@ -54,12 +80,6 @@ jobs:
           cp "$GITHUB_STEP_SUMMARY" ci-logs/summary.md || true
           cp "$d"/app/build/test-results/testDebugUnitTest/*.xml ci-logs/tests/ 2>/dev/null || true
           exit $rc
-      - if: ${{ always() && inputs.task == 'create-signing-key' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: vortex-debug-key-secret
-          path: key/
-          retention-days: 1
       - if: ${{ always() && steps.run.outputs.assemble == 'success' }}
         uses: actions/upload-artifact@v4
         with:
