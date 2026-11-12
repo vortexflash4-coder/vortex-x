@@ -1,0 +1,385 @@
+package com.vortexx.player.feature.ai
+
+import android.net.Uri
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.RecordVoiceOver
+import androidx.compose.material.icons.rounded.TextFields
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
+import com.vortexx.player.ai.AiEngine
+import com.vortexx.player.ai.AiModels
+import com.vortexx.player.ai.AiState
+import com.vortexx.player.ai.AiStore
+import com.vortexx.player.ai.AiTarget
+import com.vortexx.player.ai.AiTask
+import com.vortexx.player.ai.lyrics.Lrc
+import com.vortexx.player.ai.lyrics.LyricLine
+import com.vortexx.player.core.util.Format
+import com.vortexx.player.playback.PlaybackConnection
+import com.vortexx.player.playback.PositionSnapshot
+import com.vortexx.player.ui.designsystem.components.EmptyState
+import com.vortexx.player.ui.designsystem.components.InlineNotice
+import com.vortexx.player.ui.designsystem.components.MetaChip
+import com.vortexx.player.ui.designsystem.components.PillChip
+import com.vortexx.player.ui.designsystem.components.PrimaryButton
+import com.vortexx.player.ui.designsystem.components.ProgressLine
+import com.vortexx.player.ui.designsystem.components.ScreenMargin
+import com.vortexx.player.ui.designsystem.components.SecondaryButton
+import com.vortexx.player.ui.designsystem.components.VortexTopBar
+import com.vortexx.player.ui.designsystem.theme.VortexColors
+import com.vortexx.player.ui.designsystem.theme.VortexSpacing
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+/** What exists on the phone for one song. */
+data class AiFiles(val hasKaraoke: Boolean, val hasLyrics: Boolean, val bytes: Long)
+
+/** Languages offered for lyrics: label to Whisper code (null = let the model decide). */
+val LyricsLanguages: List<Pair<String, String?>> = listOf(
+    "Auto" to null,
+    "Hindi" to "hi",
+    "English" to "en",
+    "Punjabi" to "pa",
+    "Urdu" to "ur",
+    "Bengali" to "bn",
+    "Marathi" to "mr",
+    "Tamil" to "ta",
+    "Telugu" to "te",
+    "Gujarati" to "gu",
+)
+
+@HiltViewModel
+class AiStudioViewModel @Inject constructor(
+    private val playback: PlaybackConnection,
+    private val engine: AiEngine,
+    private val store: AiStore,
+    private val models: AiModels,
+) : ViewModel() {
+
+    private val _target = MutableStateFlow<AiTarget?>(null)
+
+    /** The library song AI Studio works on: the last one that played from the library. */
+    val target: StateFlow<AiTarget?> = _target.asStateFlow()
+    val engineState: StateFlow<AiState> = engine.state
+    val changes: StateFlow<Int> = store.changes
+    val position: Flow<PositionSnapshot> = playback.positionUpdates(intervalMs = 300L)
+
+    val karaokeAvailable: Boolean get() = models.karaokeAvailable
+    val lyricsAvailable: Boolean get() = models.lyricsAvailable
+    val modelBytes: Long get() = models.packagedBytes
+
+    init {
+        viewModelScope.launch {
+            playback.state.collect { state ->
+                val playing = state.nowPlaying
+                val id = playing?.songId
+                val uri = playing?.contentUri
+                // The karaoke track itself is not a library song, so the target stays on the original.
+                if (playing != null && id != null && uri != null && engine.state.value !is AiState.Running) {
+                    _target.value = AiTarget(AiStore.keyFor(id), playing.title, playing.artist, uri)
+                }
+            }
+        }
+    }
+
+    fun files(key: String): AiFiles = AiFiles(store.hasKaraoke(key), store.hasLyrics(key), store.bytes(key))
+
+    fun lyrics(key: String): List<LyricLine> = store.readLyrics(key)
+
+    fun start(target: AiTarget, task: AiTask, language: String?) = engine.start(target, task, language)
+
+    fun cancel() = engine.cancel()
+
+    fun dismiss() = engine.dismiss()
+
+    fun playMusicOnly(target: AiTarget) =
+        playback.playExternalUri(Uri.fromFile(store.music(target.key)), "${target.title} (karaoke)")
+
+    fun playVoiceOnly(target: AiTarget) =
+        playback.playExternalUri(Uri.fromFile(store.vocals(target.key)), "${target.title} (voice)")
+
+    fun deleteKaraoke(target: AiTarget) = store.deleteKaraoke(target.key)
+
+    fun deleteLyrics(target: AiTarget) = store.deleteLyrics(target.key)
+}
+
+/**
+ * AI Studio: make a karaoke track and lyrics for the current song with models
+ * that run on the phone. Shows honest states: not in this build, working
+ * (stage and percent), failed (the reason), ready.
+ */
+@Composable
+fun AiStudioScreen(
+    onBack: () -> Unit,
+    viewModel: AiStudioViewModel = hiltViewModel(),
+) {
+    val target by viewModel.target.collectAsStateWithLifecycle()
+    val state by viewModel.engineState.collectAsStateWithLifecycle()
+    val changes by viewModel.changes.collectAsStateWithLifecycle()
+    val position by viewModel.position.collectAsStateWithLifecycle(initialValue = PositionSnapshot())
+    var languageIndex by rememberSaveable { mutableStateOf(0) }
+
+    Column(Modifier.fillMaxSize()) {
+        VortexTopBar(title = "AI Studio", subtitle = "Runs on this phone. Nothing is uploaded.", onBack = onBack)
+        val current = target
+        if (current == null) {
+            EmptyState(
+                icon = Icons.Rounded.AutoAwesome,
+                title = "Play a song first",
+                message = "Start any song from your library, then come back here to make its karaoke track and lyrics.",
+            )
+        } else {
+            val files = remember(current.key, changes, state) { viewModel.files(current.key) }
+            val lines = remember(current.key, changes) { viewModel.lyrics(current.key) }
+            val running = state as? AiState.Running
+            val busy = running != null
+            val currentLine = Lrc.indexAt(lines, position.positionMs)
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = ScreenMargin, end = ScreenMargin, top = VortexSpacing.sm, bottom = VortexSpacing.xxl),
+                verticalArrangement = Arrangement.spacedBy(VortexSpacing.md),
+            ) {
+                item(key = "song") { SongHeader(current, files) }
+                item(key = "job") { JobStatus(state, current, onCancel = viewModel::cancel, onDismiss = viewModel::dismiss) }
+                item(key = "karaoke") {
+                    StudioCard(icon = Icons.Rounded.Mic, title = "Karaoke", subtitle = "Takes the singer's voice out of the song") {
+                        when {
+                            !viewModel.karaokeAvailable -> InlineNotice("The voice-separation model is not part of this build.")
+                            files.hasKaraoke -> {
+                                Row(horizontalArrangement = Arrangement.spacedBy(VortexSpacing.sm)) {
+                                    PrimaryButton("Music only", onClick = { viewModel.playMusicOnly(current) }, icon = Icons.Rounded.PlayArrow, modifier = Modifier.weight(1f))
+                                    SecondaryButton("Voice only", onClick = { viewModel.playVoiceOnly(current) }, icon = Icons.Rounded.RecordVoiceOver, modifier = Modifier.weight(1f))
+                                }
+                                Spacer(Modifier.height(VortexSpacing.sm))
+                                SecondaryButton("Delete karaoke track", onClick = { viewModel.deleteKaraoke(current) }, icon = Icons.Rounded.Delete, enabled = !busy)
+                            }
+                            else -> {
+                                PrimaryButton(
+                                    "Make karaoke track",
+                                    onClick = { viewModel.start(current, AiTask.Karaoke, null) },
+                                    icon = Icons.Rounded.AutoAwesome,
+                                    enabled = !busy,
+                                )
+                                Hint("Works on the whole song, usually one to three minutes. Keep VORTEX X open while it runs.")
+                            }
+                        }
+                    }
+                }
+                item(key = "lyrics") {
+                    StudioCard(icon = Icons.Rounded.TextFields, title = "Lyrics", subtitle = "Listens to the voice and writes the words with their times") {
+                        if (!viewModel.lyricsAvailable) {
+                            InlineNotice("The speech model is not part of this build.")
+                        } else {
+                            Row(
+                                Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(VortexSpacing.sm),
+                            ) {
+                                LyricsLanguages.forEachIndexed { index, (label, _) ->
+                                    PillChip(label, selected = index == languageIndex, onClick = { languageIndex = index })
+                                }
+                            }
+                            Spacer(Modifier.height(VortexSpacing.md))
+                            PrimaryButton(
+                                if (files.hasLyrics) "Write the lyrics again" else "Write lyrics",
+                                onClick = { viewModel.start(current, AiTask.Lyrics, LyricsLanguages[languageIndex].second) },
+                                icon = Icons.Rounded.AutoAwesome,
+                                enabled = !busy,
+                            )
+                            if (files.hasLyrics) {
+                                Spacer(Modifier.height(VortexSpacing.sm))
+                                SecondaryButton("Delete lyrics", onClick = { viewModel.deleteLyrics(current) }, icon = Icons.Rounded.Delete, enabled = !busy)
+                            }
+                            Hint("The model makes mistakes, more so with fast or soft singing. A song takes a few minutes.")
+                        }
+                    }
+                }
+                if (lines.isNotEmpty()) {
+                    item(key = "lines-title") {
+                        Text("Lyrics (written by AI)", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = VortexSpacing.sm))
+                    }
+                    itemsIndexed(lines, key = { index, _ -> "line-$index" }) { index, line ->
+                        LyricRow(line, isCurrent = index == currentLine)
+                    }
+                }
+                item(key = "about") {
+                    Text(
+                        "Models inside this app: Spleeter 2-stems (Deezer, MIT) for voice separation and Whisper (OpenAI, MIT) for the words, " +
+                            "run with ONNX Runtime. Packaged model size: ${Format.bytes(viewModel.modelBytes)}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = VortexColors.TextSecondary,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SongHeader(target: AiTarget, files: AiFiles) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .size(52.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(VortexColors.AccentContainer),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Rounded.MusicNote, contentDescription = null, tint = VortexColors.Accent)
+        }
+        Spacer(Modifier.width(VortexSpacing.md))
+        Column(Modifier.weight(1f)) {
+            Text(target.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(target.artist, style = MaterialTheme.typography.bodySmall, color = VortexColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (files.bytes > 0) MetaChip(Format.bytes(files.bytes))
+    }
+}
+
+/** The running, failed or finished job, when it belongs to [target]. */
+@Composable
+private fun JobStatus(state: AiState, target: AiTarget, onCancel: () -> Unit, onDismiss: () -> Unit) {
+    val shape = RoundedCornerShape(16.dp)
+    when (state) {
+        is AiState.Running -> Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(VortexColors.Card)
+                .border(1.dp, VortexColors.Accent.copy(alpha = 0.5f), shape)
+                .padding(VortexSpacing.lg),
+        ) {
+            Text(
+                if (state.target.key == target.key) state.stage else "Working on ${state.target.title}: ${state.stage}",
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Spacer(Modifier.height(VortexSpacing.sm))
+            ProgressLine(state.progress, height = 6.dp)
+            Spacer(Modifier.height(VortexSpacing.sm))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("${(state.progress * 100).toInt()} %", style = MaterialTheme.typography.bodySmall, color = VortexColors.TextSecondary, modifier = Modifier.weight(1f))
+                SecondaryButton("Stop", onClick = onCancel, icon = Icons.Rounded.Close)
+            }
+        }
+        is AiState.Failed -> InlineNotice(
+            text = "${if (state.task == AiTask.Karaoke) "Karaoke" else "Lyrics"} did not finish: ${state.message}",
+            actionLabel = "OK",
+            onAction = onDismiss,
+        )
+        is AiState.Finished -> InlineNotice(
+            text = "${if (state.task == AiTask.Karaoke) "Karaoke track" else "Lyrics"} ready for ${state.target.title} in ${Format.duration(state.seconds * 1000L)}.",
+            actionLabel = "OK",
+            onAction = onDismiss,
+        )
+        AiState.Idle -> Unit
+    }
+}
+
+@Composable
+private fun StudioCard(icon: ImageVector, title: String, subtitle: String, content: @Composable () -> Unit) {
+    val shape = RoundedCornerShape(20.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(VortexColors.Card)
+            .border(1.dp, VortexColors.Divider, shape)
+            .padding(VortexSpacing.lg),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(VortexColors.AccentContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(icon, contentDescription = null, tint = VortexColors.Accent, modifier = Modifier.size(22.dp))
+            }
+            Spacer(Modifier.width(VortexSpacing.md))
+            Column {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = VortexColors.TextSecondary)
+            }
+        }
+        Spacer(Modifier.height(VortexSpacing.md))
+        content()
+    }
+}
+
+@Composable
+private fun Hint(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = VortexColors.TextSecondary,
+        modifier = Modifier.padding(top = VortexSpacing.sm),
+    )
+}
+
+@Composable
+private fun LyricRow(line: LyricLine, isCurrent: Boolean) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Text(
+            Format.duration(line.timeMs),
+            style = MaterialTheme.typography.labelSmall,
+            color = if (isCurrent) VortexColors.Accent else VortexColors.TextSecondary,
+            modifier = Modifier
+                .width(48.dp)
+                .padding(top = 3.dp),
+        )
+        Text(
+            line.text,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+            color = if (isCurrent) VortexColors.TextPrimary else VortexColors.TextSecondary,
+        )
+    }
+}
