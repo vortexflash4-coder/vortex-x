@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs before Gradle. In an overlay branch it first applies the branch patch (.vx-patch) and
+# Runs before Gradle. In an overlay branch it first applies the branch patches (.vx-patch, .vx-patch2) and
 # checks the pushed files against .vx-sha256; then it downloads the AI models and the brand font.
 # Montserrat: SIL Open Font License 1.1 (google/fonts, ofl/montserrat). The exit status is the
 # font's: without the font the app uses the platform font.
@@ -11,14 +11,15 @@ DIR="$(cd "${1:?project dir}" && pwd)"
 cd "$DIR"
 NOTE="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
-if [ -f .vx-patch ]; then
-  if patch -p1 --no-backup-if-mismatch < .vx-patch; then
-    echo "Overlay patch applied." >> "$NOTE"
+for PATCH in .vx-patch .vx-patch2; do
+  [ -f "$PATCH" ] || continue
+  if patch -p1 --no-backup-if-mismatch < "$PATCH"; then
+    echo "Overlay patch applied ($PATCH)." >> "$NOTE"
   else
-    echo "::error::The overlay patch (.vx-patch) did not apply."
-    echo "### Overlay patch FAILED: the build below does not contain the patched changes" >> "$NOTE"
+    echo "::error::The overlay patch ($PATCH) did not apply."
+    echo "### Overlay patch FAILED ($PATCH): the build below does not contain the patched changes" >> "$NOTE"
   fi
-fi
+done
 if [ -f .vx-sha256 ]; then
   if sha256sum -c .vx-sha256 > "$DIR/.vx-sha.log" 2>&1; then
     echo "Overlay files verified: $(grep -c ': OK$' "$DIR/.vx-sha.log") SHA-256 matches." >> "$NOTE"

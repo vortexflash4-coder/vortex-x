@@ -1,0 +1,384 @@
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/Biquad.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/Biquad.kt
+@@ -58,0 +59,57 @@
++    /** Low shelf (slope 1): [gainDb] well below [cornerHz], half of it at the corner, 0 dB well above. */
++    fun setLowShelf(sampleRate: Int, cornerHz: Double, gainDb: Double) {
++        if (gainDb == 0.0) {
++            setIdentity()
++            return
++        }
++        val a = 10.0.pow(gainDb / 40.0)
++        val w0 = 2.0 * PI * cornerHz / sampleRate
++        val cosW0 = cos(w0)
++        val beta = 2.0 * sqrt(a) * (sin(w0) / 2.0 * sqrt(2.0))
++        val a0 = (a + 1.0) + (a - 1.0) * cosW0 + beta
++        b0 = a * ((a + 1.0) - (a - 1.0) * cosW0 + beta) / a0
++        b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cosW0) / a0
++        b2 = a * ((a + 1.0) - (a - 1.0) * cosW0 - beta) / a0
++        a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cosW0) / a0
++        a2 = ((a + 1.0) + (a - 1.0) * cosW0 - beta) / a0
++    }
++
++    /** Second-order low-pass; [q] = 0.7071 gives a Butterworth response. */
++    fun setLowPass(sampleRate: Int, cornerHz: Double, q: Double) {
++        val w0 = 2.0 * PI * cornerHz / sampleRate
++        val alpha = sin(w0) / (2.0 * q)
++        val cosW0 = cos(w0)
++        val a0 = 1.0 + alpha
++        b0 = (1.0 - cosW0) / 2.0 / a0
++        b1 = (1.0 - cosW0) / a0
++        b2 = (1.0 - cosW0) / 2.0 / a0
++        a1 = (-2.0 * cosW0) / a0
++        a2 = (1.0 - alpha) / a0
++    }
++
++    /** Second-order high-pass; [q] = 0.7071 gives a Butterworth response. */
++    fun setHighPass(sampleRate: Int, cornerHz: Double, q: Double) {
++        val w0 = 2.0 * PI * cornerHz / sampleRate
++        val alpha = sin(w0) / (2.0 * q)
++        val cosW0 = cos(w0)
++        val a0 = 1.0 + alpha
++        b0 = (1.0 + cosW0) / 2.0 / a0
++        b1 = -(1.0 + cosW0) / a0
++        b2 = (1.0 + cosW0) / 2.0 / a0
++        a1 = (-2.0 * cosW0) / a0
++        a2 = (1.0 - alpha) / a0
++    }
++
++    /** Second-order all-pass: changes phase only, as a low-pass plus high-pass crossover pair does. */
++    fun setAllPass(sampleRate: Int, cornerHz: Double, q: Double) {
++        val w0 = 2.0 * PI * cornerHz / sampleRate
++        val alpha = sin(w0) / (2.0 * q)
++        val cosW0 = cos(w0)
++        val a0 = 1.0 + alpha
++        b0 = (1.0 - alpha) / a0
++        b1 = (-2.0 * cosW0) / a0
++        b2 = 1.0
++        a1 = (-2.0 * cosW0) / a0
++        a2 = (1.0 - alpha) / a0
++    }
++
+--- a/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt
++++ b/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt
+@@ -25 +25 @@
+-    private val chain = DspChain(host.meters)
++    private val chain = DspChain(host.meters, host.dynamics)
+@@ -37,0 +38,3 @@
++    /** True between the end of the input and the hand-over of what the limiter still holds. */
++    private var tailPending = false
++
+@@ -75,0 +79 @@
++        tailPending = false
+@@ -104,0 +109 @@
++        tailPending = false
+@@ -145,13 +150 @@
+-            if (isFloat) {
+-                // Sample ceiling: never hand the output more than full scale. Overs are already counted.
+-                for (i in 0 until samples) {
+-                    val x = buffer[i]
+-                    output.putFloat(if (x > 1f) 1f else if (x < -1f) -1f else x)
+-                }
+-            } else {
+-                for (i in 0 until samples) {
+-                    val value = Math.round(buffer[i] * FLOAT_TO_INT16)
+-                    val clamped = if (value > Short.MAX_VALUE) Short.MAX_VALUE.toInt() else if (value < Short.MIN_VALUE) Short.MIN_VALUE.toInt() else value
+-                    output.putShort(clamped.toShort())
+-                }
+-            }
++            write(output, samples, isFloat)
+@@ -165 +158,3 @@
+-            host.onProcessedPosition(streamOffsetUs + framesSinceFlush * 1_000_000L / activeSampleRate)
++            // With the limiter in, the last frames taken in are still inside its look-ahead.
++            val finished = maxOf(0L, framesSinceFlush - chain.latencyFrames)
++            host.onProcessedPosition(streamOffsetUs + finished * 1_000_000L / activeSampleRate)
+@@ -167,0 +163,61 @@
++    }
++
++    private fun write(output: ByteBuffer, samples: Int, isFloat: Boolean) {
++        val buffer = work
++        if (isFloat) {
++            // Sample ceiling: never hand the output more than full scale. Overs are already counted.
++            for (i in 0 until samples) {
++                val x = buffer[i]
++                output.putFloat(if (x > 1f) 1f else if (x < -1f) -1f else x)
++            }
++        } else {
++            for (i in 0 until samples) {
++                val value = Math.round(buffer[i] * FLOAT_TO_INT16)
++                val clamped = if (value > Short.MAX_VALUE) Short.MAX_VALUE.toInt() else if (value < Short.MIN_VALUE) Short.MIN_VALUE.toInt() else value
++                output.putShort(clamped.toShort())
++            }
++        }
++    }
++
++    /**
++     * The limiter delays the signal by its look-ahead, so at the end of the
++     * stream it still holds that much audio. Media3 asks for output only when
++     * the previous output buffer has been used up, so the rest is produced
++     * here, not in [onQueueEndOfStream], where it could overwrite a buffer that
++     * is still being played.
++     */
++    override fun onQueueEndOfStream() {
++        tailPending = activeChannels > 0 && chain.latencyFrames > 0
++    }
++
++    override fun getOutput(): ByteBuffer {
++        if (tailPending && super.isEnded()) {
++            tailPending = false
++            writeTail()
++        }
++        return super.getOutput()
++    }
++
++    override fun isEnded(): Boolean = !tailPending && super.isEnded()
++
++    private fun writeTail() {
++        val channels = activeChannels
++        val frames = chain.latencyFrames
++        if (channels == 0 || frames == 0) return
++        val isFloat = activeEncoding == C.ENCODING_PCM_FLOAT
++        val output = replaceOutputBuffer(frames * channels * (if (isFloat) 4 else 2))
++        val now = System.nanoTime()
++        var done = 0
++        while (done < frames) {
++            val chunk = minOf(CHUNK_FRAMES, frames - done)
++            val samples = chunk * channels
++            java.util.Arrays.fill(work, 0, samples, 0f)
++            chain.process(work, chunk, now)
++            write(output, samples, isFloat)
++            done += chunk
++        }
++        output.flip()
++        // Everything that was taken in has now been handed on.
++        if (streamOffsetUs != C.TIME_UNSET) {
++            host.onProcessedPosition(streamOffsetUs + framesSinceFlush * 1_000_000L / activeSampleRate)
++        }
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt
+@@ -16,0 +17,3 @@
++    /** Where the limiter and compressor report how much they turn down; null = not shown anywhere. */
++    val dynamics: DynamicsMeters? get() = null
++
+--- a/app/src/main/java/com/vortexx/player/audio/engine/DspStatus.kt
++++ b/app/src/main/java/com/vortexx/player/audio/engine/DspStatus.kt
+@@ -57 +57 @@
+-        else -> DspStatus(DspStatusKind.Active, "Active", "Preamp and 10-band EQ are processing the samples you hear.")
++        else -> DspStatus(DspStatusKind.Active, "Active", "The Audio Lab is processing the samples you hear.")
+--- a/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
++++ b/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
+@@ -7,0 +8 @@
++import androidx.datastore.preferences.core.intPreferencesKey
+@@ -10,0 +12 @@
++import com.vortexx.player.audio.dsp.DynamicsMeters
+@@ -14,0 +17,2 @@
++import com.vortexx.player.audio.dsp.SoundPreset
++import com.vortexx.player.audio.dsp.SoundPresets
+@@ -56,0 +61 @@
++    override val dynamics = DynamicsMeters()
+@@ -80,0 +86,5 @@
++    private val _userPresets = MutableStateFlow<List<SoundPreset>>(emptyList())
++
++    /** The presets the user saved, oldest first. */
++    val userPresets: StateFlow<List<SoundPreset>> = _userPresets.asStateFlow()
++
+@@ -89,0 +100,6 @@
++                bassDb = DspParameters.clampBass(prefs[KEY_BASS] ?: 0f),
++                punchDb = DspParameters.clampPunch(prefs[KEY_PUNCH] ?: 0f),
++                speakerProtect = prefs[KEY_PROTECT] ?: false,
++                compressor = DspParameters.clampCompressor(prefs[KEY_COMPRESSOR] ?: 0),
++                limiter = prefs[KEY_LIMITER] ?: false,
++                widthPercent = DspParameters.clampWidth(prefs[KEY_WIDTH] ?: 100),
+@@ -90,0 +107 @@
++            _userPresets.value = SoundPresets.decodeUser(prefs[KEY_USER_PRESETS])
+@@ -106,0 +124,31 @@
++    fun setBass(db: Float) = publish(userParameters.copy(bassDb = DspParameters.clampBass(db)))
++
++    fun setPunch(db: Float) = publish(userParameters.copy(punchDb = DspParameters.clampPunch(db)))
++
++    fun setSpeakerProtect(on: Boolean) = publish(userParameters.copy(speakerProtect = on))
++
++    fun setCompressor(amount: Int) = publish(userParameters.copy(compressor = DspParameters.clampCompressor(amount)))
++
++    fun setLimiter(on: Boolean) = publish(userParameters.copy(limiter = on))
++
++    fun setWidth(percent: Int) = publish(userParameters.copy(widthPercent = DspParameters.clampWidth(percent)))
++
++    /** Takes the preset's sound; the on/off switch and speaker protect stay as they are. */
++    fun applyPreset(preset: SoundPreset) =
++        publish(preset.parameters.copy(enabled = userParameters.enabled, speakerProtect = userParameters.speakerProtect))
++
++    /** Saves the current sound under [name]. False when the name is empty or belongs to a built-in preset. */
++    fun saveUserPreset(name: String): Boolean {
++        val clean = SoundPresets.cleanName(name)
++        if (!SoundPresets.isUsableName(clean)) return false
++        storeUserPresets(SoundPresets.withSaved(_userPresets.value, clean, userParameters))
++        return true
++    }
++
++    fun deleteUserPreset(name: String) = storeUserPresets(_userPresets.value.filterNot { it.name == name })
++
++    private fun storeUserPresets(presets: List<SoundPreset>) {
++        _userPresets.value = presets
++        scope.launch { dataStore.edit { it[KEY_USER_PRESETS] = SoundPresets.encodeUser(presets) } }
++    }
++
+@@ -108,3 +156,3 @@
+-     * Sets preamp to minus the combined EQ peak (overlapping bands included),
+-     * so a full-scale signal at the loudest frequency stays below 0 dBFS
+-     * whenever that peak is 12 dB or less.
++     * Sets preamp to minus the combined peak of EQ, bass shelf and kick band
++     * (overlaps included), so a full-scale signal at the loudest frequency
++     * stays below 0 dBFS whenever that peak is 12 dB or less.
+@@ -112 +160,5 @@
+-    fun applyAutoHeadroom() = publish(userParameters.withPreamp(EqResponse.autoPreampDb(userParameters.bandGainsDb)))
++    fun applyAutoHeadroom() = publish(
++        userParameters.withPreamp(
++            EqResponse.autoPreampDb(userParameters.bandGainsDb, bassDb = userParameters.bassDb, punchDb = userParameters.punchDb),
++        ),
++    )
+@@ -148,0 +201,6 @@
++                prefs[KEY_BASS] = next.bassDb
++                prefs[KEY_PUNCH] = next.punchDb
++                prefs[KEY_PROTECT] = next.speakerProtect
++                prefs[KEY_COMPRESSOR] = next.compressor
++                prefs[KEY_LIMITER] = next.limiter
++                prefs[KEY_WIDTH] = next.widthPercent
+@@ -158,0 +217,7 @@
++        val KEY_BASS = floatPreferencesKey("dsp_bass_db")
++        val KEY_PUNCH = floatPreferencesKey("dsp_punch_db")
++        val KEY_PROTECT = booleanPreferencesKey("dsp_speaker_protect")
++        val KEY_COMPRESSOR = intPreferencesKey("dsp_compressor")
++        val KEY_LIMITER = booleanPreferencesKey("dsp_limiter")
++        val KEY_WIDTH = intPreferencesKey("dsp_width_percent")
++        val KEY_USER_PRESETS = stringPreferencesKey("dsp_user_presets")
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/EqResponse.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/EqResponse.kt
+@@ -8 +8,2 @@
+- * The combined magnitude response of the 10-band EQ, computed from the same
++ * The combined magnitude response of the 10-band EQ (and, when given, the
++ * bass shelf and kick band), computed from the same
+@@ -27,2 +28,2 @@
+-    fun peak(bandGainsDb: List<Float>, sampleRate: Int = 48_000): Peak {
+-        val filters = activeFilters(bandGainsDb, sampleRate)
++    fun peak(bandGainsDb: List<Float>, sampleRate: Int = 48_000, bassDb: Float = 0f, punchDb: Float = 0f): Peak {
++        val filters = activeFilters(bandGainsDb, sampleRate, bassDb, punchDb)
+@@ -51 +52 @@
+-    fun curveDb(bandGainsDb: List<Float>, points: Int = 96, sampleRate: Int = 48_000): FloatArray {
++    fun curveDb(bandGainsDb: List<Float>, points: Int = 96, sampleRate: Int = 48_000, bassDb: Float = 0f, punchDb: Float = 0f): FloatArray {
+@@ -53 +54 @@
+-        val filters = activeFilters(bandGainsDb, sampleRate)
++        val filters = activeFilters(bandGainsDb, sampleRate, bassDb, punchDb)
+@@ -66,2 +67,4 @@
+-    private fun activeFilters(bandGainsDb: List<Float>, sampleRate: Int): List<BiquadCoefficients> {
+-        val filters = ArrayList<BiquadCoefficients>(GraphicEqBands.COUNT)
++    private fun activeFilters(bandGainsDb: List<Float>, sampleRate: Int, bassDb: Float, punchDb: Float): List<BiquadCoefficients> {
++        val filters = ArrayList<BiquadCoefficients>(GraphicEqBands.COUNT + 2)
++        if (bassDb != 0f) filters += BiquadCoefficients().apply { setLowShelf(sampleRate, BassTone.SHELF_HZ, bassDb.toDouble()) }
++        if (punchDb != 0f) filters += BiquadCoefficients().apply { setPeaking(sampleRate, BassTone.PUNCH_HZ, BassTone.PUNCH_Q, punchDb.toDouble()) }
+@@ -84,2 +87,2 @@
+-    fun autoPreampDb(bandGainsDb: List<Float>, sampleRate: Int = 48_000): Float {
+-        val peak = peak(bandGainsDb, sampleRate).gainDb
++    fun autoPreampDb(bandGainsDb: List<Float>, sampleRate: Int = 48_000, bassDb: Float = 0f, punchDb: Float = 0f): Float {
++        val peak = peak(bandGainsDb, sampleRate, bassDb, punchDb).gainDb
+--- a/app/src/main/java/com/vortexx/player/ui/designsystem/instrument/EqCurve.kt
++++ b/app/src/main/java/com/vortexx/player/ui/designsystem/instrument/EqCurve.kt
+@@ -33,0 +34,2 @@
++    bassDb: Float = 0f,
++    punchDb: Float = 0f,
+@@ -35 +37 @@
+-    val curve = remember(bandGainsDb) { EqResponse.curveDb(bandGainsDb, points = 96) }
++    val curve = remember(bandGainsDb, bassDb, punchDb) { EqResponse.curveDb(bandGainsDb, points = 96, bassDb = bassDb, punchDb = punchDb) }
+--- a/app/src/main/java/com/vortexx/player/ui/designsystem/instrument/Instruments.kt
++++ b/app/src/main/java/com/vortexx/player/ui/designsystem/instrument/Instruments.kt
+@@ -374,0 +375 @@
++    valueText: String? = null,
+@@ -378,0 +380 @@
++    val shown = valueText ?: "${formatDb(value)} $unit"
+@@ -389 +391 @@
+-                    stateDescription = "${formatDb(value)} $unit"
++                    stateDescription = shown
+@@ -427 +429 @@
+-        Text("${formatDb(value)} $unit", style = InstrumentText.readout, modifier = Modifier.width(76.dp), textAlign = TextAlign.End)
++        Text(shown, style = InstrumentText.readout, modifier = Modifier.width(76.dp), textAlign = TextAlign.End)
+--- a/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt
+@@ -36,0 +37 @@
++import com.vortexx.player.audio.dsp.DynamicsMeters
+@@ -40,0 +42 @@
++import com.vortexx.player.audio.dsp.SoundPreset
+@@ -103,0 +106,2 @@
++    val dynamics: DynamicsMeters get() = engine.dynamics
++    val userPresets: StateFlow<List<SoundPreset>> = engine.userPresets
+@@ -132,0 +137,9 @@
++    fun setBass(db: Float) = engine.setBass(db)
++    fun setPunch(db: Float) = engine.setPunch(db)
++    fun setSpeakerProtect(on: Boolean) = engine.setSpeakerProtect(on)
++    fun setCompressor(amount: Int) = engine.setCompressor(amount)
++    fun setLimiter(on: Boolean) = engine.setLimiter(on)
++    fun setWidth(percent: Int) = engine.setWidth(percent)
++    fun applyPreset(preset: SoundPreset) = engine.applyPreset(preset)
++    fun savePreset(name: String): Boolean = engine.saveUserPreset(name)
++    fun deletePreset(name: String) = engine.deleteUserPreset(name)
+@@ -161,0 +175 @@
++    val userPresets by viewModel.userPresets.collectAsStateWithLifecycle()
+@@ -163,2 +177,4 @@
+-    // Combined response of all bands (neighbours overlap), not just the largest single boost.
+-    val autoPreamp = remember(params.bandGainsDb) { EqResponse.autoPreampDb(params.bandGainsDb) }
++    // Combined response of all bands and the bass section (they overlap), not just the largest single boost.
++    val autoPreamp = remember(params.bandGainsDb, params.bassDb, params.punchDb) {
++        EqResponse.autoPreampDb(params.bandGainsDb, bassDb = params.bassDb, punchDb = params.punchDb)
++    }
+@@ -170 +186 @@
+-        VortexTopBar(title = "Audio Lab", subtitle = "Preamp · 10-band EQ · live meters", onBack = onBack)
++        VortexTopBar(title = "Audio Lab", subtitle = "Presets · bass · EQ · compressor · limiter", onBack = onBack)
+@@ -209,0 +226,16 @@
++            item(key = "presets") {
++                PresetPanel(
++                    parameters = params,
++                    userPresets = userPresets,
++                    onApply = viewModel::applyPreset,
++                    onSave = viewModel::savePreset,
++                    onDelete = viewModel::deletePreset,
++                )
++            }
++            item(key = "bass") {
++                BassPanel(params, onBass = viewModel::setBass, onPunch = viewModel::setPunch, onProtect = viewModel::setSpeakerProtect)
++            }
++            item(key = "dynamics") {
++                DynamicsPanel(params, viewModel.dynamics, onCompressor = viewModel::setCompressor, onLimiter = viewModel::setLimiter)
++            }
++
+@@ -247,0 +280,2 @@
++                        bassDb = params.bassDb,
++                        punchDb = params.punchDb,
+@@ -281 +315 @@
+-                    "Drag a fader; double-tap resets it. ±12 dB per band; swipe sideways for more bands. Neighbouring boosts add up: use Auto headroom if the clip light turns on.",
++                    "Drag a fader; double-tap resets it. ±12 dB per band; swipe sideways for more bands. Neighbouring boosts add up: if the clip light turns on, use Auto headroom or switch the limiter on.",
+@@ -287,0 +322,2 @@
++
++            item(key = "width") { WidthPanel(params, onWidth = viewModel::setWidth) }
+--- a/app/src/main/java/com/vortexx/player/feature/you/YouScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/you/YouScreen.kt
+@@ -283,0 +284,2 @@
++            bassDb = dsp.bassDb,
++            punchDb = dsp.punchDb,
+--- a/app/src/main/java/com/vortexx/player/feature/nowplaying/NowPlayingScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/nowplaying/NowPlayingScreen.kt
+@@ -606,0 +607,2 @@
++            bassDb = dsp.bassDb,
++            punchDb = dsp.punchDb,
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -21,2 +21,2 @@
+-        versionCode = 7
+-        versionName = "0.5.0-ai"
++        versionCode = 8
++        versionName = "0.6.0-dsp"
+--- a/.github/scripts/ci-smoke.sh
++++ b/.github/scripts/ci-smoke.sh
+@@ -52,0 +53,2 @@
++# The APK carries the AI models (about 500 MB); the default data partition is too small to install it.
++echo "disk.dataPartition.size=6G" >> "$ANDROID_AVD_HOME/vxsmoke.avd/config.ini"
+@@ -99 +101 @@
+-if ! "$ADB" install -r "$APK" > "$OUT/install.log" 2>&1; then
++if ! timeout 900 "$ADB" install -r "$APK" > "$OUT/install.log" 2>&1; then
