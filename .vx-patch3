@@ -1,0 +1,14 @@
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/Dynamics.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/Dynamics.kt
+@@ -163 +163,2 @@
+-        private const val SNAP_TO_UNITY = 1e-9
++        /** Once the gain is this close to 1 it is set to exactly 1 (a step of −120 dB, below what 16-bit output can carry). */
++        private const val SNAP_TO_UNITY = 1e-6
+--- a/.github/scripts/ci-smoke.sh
++++ b/.github/scripts/ci-smoke.sh
+@@ -53,2 +53,3 @@
+-# The APK carries the AI models (about 500 MB); the default data partition is too small to install it.
+-echo "disk.dataPartition.size=6G" >> "$ANDROID_AVD_HOME/vxsmoke.avd/config.ini"
++# The APK carries the AI models (about 500 MB), so the data partition is set here: large enough to
++# install it, small enough for the CI machine's free disk (the emulator wants 1.2 times this size).
++echo "disk.dataPartition.size=3G" >> "$ANDROID_AVD_HOME/vxsmoke.avd/config.ini"

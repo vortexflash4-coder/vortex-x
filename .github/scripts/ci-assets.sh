@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Runs before Gradle. In an overlay branch it first applies the branch patches (.vx-patch, .vx-patch2) and
-# checks the pushed files against .vx-sha256; then it downloads the AI models and the brand font.
+# Runs before Gradle. In an overlay branch it first applies the branch patches (.vx-patch, .vx-patch2, ... in order) and
+# checks the pushed files against the .vx-sha256 lists; then it downloads the AI models and the brand font.
 # Montserrat: SIL Open Font License 1.1 (google/fonts, ofl/montserrat). The exit status is the
 # font's: without the font the app uses the platform font.
 #
@@ -11,7 +11,7 @@ DIR="$(cd "${1:?project dir}" && pwd)"
 cd "$DIR"
 NOTE="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
-for PATCH in .vx-patch .vx-patch2; do
+for PATCH in .vx-patch*; do
   [ -f "$PATCH" ] || continue
   if patch -p1 --no-backup-if-mismatch < "$PATCH"; then
     echo "Overlay patch applied ($PATCH)." >> "$NOTE"
@@ -21,7 +21,9 @@ for PATCH in .vx-patch .vx-patch2; do
   fi
 done
 if [ -f .vx-sha256 ]; then
-  if sha256sum -c .vx-sha256 > "$DIR/.vx-sha.log" 2>&1; then
+  # Later lists (.vx-sha256-3, ...) replace earlier entries for the same file.
+  cat .vx-sha256* | awk 'NF == 2 { hash[$2] = $1 } END { for (path in hash) print hash[path] "  " path }' > "$DIR/.vx-sha.list"
+  if sha256sum -c "$DIR/.vx-sha.list" > "$DIR/.vx-sha.log" 2>&1; then
     echo "Overlay files verified: $(grep -c ': OK$' "$DIR/.vx-sha.log") SHA-256 matches." >> "$NOTE"
   else
     {
