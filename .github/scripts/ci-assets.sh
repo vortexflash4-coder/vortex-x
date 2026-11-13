@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs before Gradle. In an overlay branch it first applies the branch patches (.vx-patch, .vx-patch2, ... in order) and
 # checks the pushed files against the .vx-sha256 lists; then it downloads the AI models and the brand font.
+# A branch with a .vx-nomodels file is built without the AI models.
 # Montserrat: SIL Open Font License 1.1 (google/fonts, ofl/montserrat). The exit status is the
 # font's: without the font the app uses the platform font.
 #
@@ -35,7 +36,9 @@ if [ -f .vx-sha256 ]; then
   fi
 fi
 
-if [ -f .github/scripts/ci-models.sh ]; then
+if [ -f .vx-nomodels ]; then
+  echo "AI models: not in this build (.vx-nomodels)." >> "$NOTE"
+elif [ -f .github/scripts/ci-models.sh ]; then
   if bash .github/scripts/ci-models.sh "$DIR"; then
     echo "AI models downloaded." >> "$NOTE"
   else
