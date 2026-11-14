@@ -1,0 +1,854 @@
+diff --git a/app/src/main/java/com/vortexx/player/feature/home/HomeScreen.kt b/app/src/main/java/com/vortexx/player/feature/home/HomeScreen.kt
+index 59782af..1eb1277 100644
+--- a/app/src/main/java/com/vortexx/player/feature/home/HomeScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/home/HomeScreen.kt
+@@ -1,15 +1,10 @@
+ package com.vortexx.player.feature.home
+ 
+ import androidx.compose.ui.graphics.graphicsLayer
+-import com.vortexx.player.ui.navigation.ShortsRoute
+-import com.vortexx.player.ui.designsystem.components.VideoThumbnail
+ import com.vortexx.player.ui.designsystem.motion.reveal
+ import com.vortexx.player.ui.designsystem.motion.rememberRevealState
+ import com.vortexx.player.ui.designsystem.motion.rememberHeroZoom
+-import com.vortexx.player.ui.designsystem.motion.pressClickable
+ import com.vortexx.player.ui.designsystem.motion.AmbientGlow
+-import com.vortexx.player.feature.shorts.shortsFrom
+-import com.vortexx.player.feature.shorts.ShortsLaunch
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.border
+ import androidx.compose.foundation.clickable
+@@ -125,8 +120,6 @@ data class HomeUiState(
+     /** Albums ordered by their newest file; the first one is the featured album. */
+     val newestAlbums: List<SongCollection> = emptyList(),
+     val continueWatching: List<VideoItemUi> = emptyList(),
+-    /** Newest short videos (up to three minutes) for the Shorts shelf. */
+-    val shorts: List<Video> = emptyList(),
+     val libraryError: String? = null,
+ )
+ 
+@@ -137,7 +130,6 @@ class HomeViewModel @Inject constructor(
+     private val playback: PlaybackConnection,
+     playbackEngine: PlaybackEngine,
+     diagnostics: AudioDiagnostics,
+-    private val shortsLaunch: ShortsLaunch,
+ ) : ViewModel() {
+ 
+     val playbackState: StateFlow<PlaybackUiState> = playback.state
+@@ -169,7 +161,6 @@ class HomeViewModel @Inject constructor(
+                 .sortedByDescending { album -> album.songs.maxOf { it.dateAddedSec } }
+                 .take(12),
+             continueWatching = continueWatching,
+-            shorts = shortsFrom(videoList).take(12),
+             libraryError = (songs as? LibraryState.Failed)?.message ?: (videos as? LibraryState.Failed)?.message,
+         )
+     }
+@@ -181,9 +172,6 @@ class HomeViewModel @Inject constructor(
+     fun playRecent(index: Int) = playback.playSongs(uiState.value.recentlyAdded, index)
+ 
+     fun playAlbum(album: SongCollection) = playback.playSongs(album.songs, 0)
+-
+-    /** Shorts opens at this video. */
+-    fun openShort(videoId: Long) = shortsLaunch.request(videoId)
+ }
+ 
+ /** Greeting from the phone's clock. */
+@@ -313,35 +301,6 @@ fun HomeScreen(
+                 }
+             }
+ 
+-            if (state.shorts.isNotEmpty()) {
+-                item(key = "shorts-title") {
+-                    SectionTitle(
+-                        "Shorts",
+-                        actionLabel = "Watch",
+-                        onAction = { onNavigate(ShortsRoute) },
+-                        modifier = Modifier.reveal(revealState, "shorts-title", order = 3),
+-                    )
+-                }
+-                item(key = "shorts-row") {
+-                    LazyRow(
+-                        modifier = Modifier.reveal(revealState, "shorts-row", order = 3),
+-                        contentPadding = PaddingValues(horizontal = ScreenMargin),
+-                        horizontalArrangement = Arrangement.spacedBy(VortexSpacing.md),
+-                    ) {
+-                        items(state.shorts, key = { it.id }) { video ->
+-                            ShortCard(
+-                                video = video,
+-                                onClick = {
+-                                    viewModel.openShort(video.id)
+-                                    onNavigate(ShortsRoute)
+-                                },
+-                                modifier = Modifier.width(128.dp),
+-                            )
+-                        }
+-                    }
+-                }
+-            }
+-
+             if (state.continueWatching.isNotEmpty()) {
+                 item(key = "cw-title") {
+                     SectionTitle("Continue watching", actionLabel = "All videos", onAction = { onNavigate(VideosRoute) })
+@@ -510,43 +469,6 @@ private fun FeaturedAlbum(
+     }
+ }
+ 
+-/** Portrait card on the Home Shorts shelf. */
+-@Composable
+-private fun ShortCard(video: Video, onClick: () -> Unit, modifier: Modifier = Modifier) {
+-    val shape = RoundedCornerShape(16.dp)
+-    Box(
+-        modifier
+-            .aspectRatio(9f / 16f)
+-            .pressClickable(onClickLabel = "Play ${video.title}", clipShape = shape, onClick = onClick)
+-            .border(1.dp, VortexColors.Divider, shape),
+-    ) {
+-        VideoThumbnail(video, Modifier.fillMaxSize(), cornerRadius = 0.dp)
+-        Box(
+-            Modifier
+-                .fillMaxSize()
+-                .background(Brush.verticalGradient(0.5f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.85f))),
+-        )
+-        Column(
+-            Modifier
+-                .align(Alignment.BottomStart)
+-                .padding(VortexSpacing.sm),
+-        ) {
+-            Text(
+-                video.title,
+-                style = MaterialTheme.typography.labelLarge,
+-                color = Color.White,
+-                maxLines = 2,
+-                overflow = TextOverflow.Ellipsis,
+-            )
+-            Text(
+-                Format.duration(video.durationMs),
+-                style = MaterialTheme.typography.labelSmall,
+-                color = Color.White.copy(alpha = 0.75f),
+-            )
+-        }
+-    }
+-}
+-
+ @Composable
+ private fun EmptyLibraryCard(onRescan: () -> Unit, modifier: Modifier = Modifier) {
+     val shape = RoundedCornerShape(20.dp)
+diff --git a/app/src/main/java/com/vortexx/player/feature/shorts/ShortsScreen.kt b/app/src/main/java/com/vortexx/player/feature/shorts/ShortsScreen.kt
+deleted file mode 100644
+index 824c055..0000000
+--- a/app/src/main/java/com/vortexx/player/feature/shorts/ShortsScreen.kt
++++ /dev/null
+@@ -1,568 +0,0 @@
+-package com.vortexx.player.feature.shorts
+-
+-import android.content.Context
+-import android.content.Intent
+-import android.net.Uri
+-import android.view.TextureView
+-import androidx.compose.animation.AnimatedVisibility
+-import androidx.compose.animation.core.Animatable
+-import androidx.compose.animation.core.tween
+-import androidx.compose.animation.fadeIn
+-import androidx.compose.animation.fadeOut
+-import androidx.compose.foundation.ExperimentalFoundationApi
+-import androidx.compose.foundation.background
+-import androidx.compose.foundation.clickable
+-import androidx.compose.foundation.gestures.detectTapGestures
+-import androidx.compose.foundation.layout.Arrangement
+-import androidx.compose.foundation.layout.Box
+-import androidx.compose.foundation.layout.Column
+-import androidx.compose.foundation.layout.Row
+-import androidx.compose.foundation.layout.Spacer
+-import androidx.compose.foundation.layout.aspectRatio
+-import androidx.compose.foundation.layout.fillMaxSize
+-import androidx.compose.foundation.layout.fillMaxWidth
+-import androidx.compose.foundation.layout.height
+-import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.layout.size
+-import androidx.compose.foundation.layout.statusBarsPadding
+-import androidx.compose.foundation.layout.width
+-import androidx.compose.foundation.pager.VerticalPager
+-import androidx.compose.foundation.pager.rememberPagerState
+-import androidx.compose.foundation.shape.CircleShape
+-import androidx.compose.foundation.shape.RoundedCornerShape
+-import androidx.compose.material.icons.Icons
+-import androidx.compose.material.icons.rounded.Favorite
+-import androidx.compose.material.icons.rounded.FavoriteBorder
+-import androidx.compose.material.icons.rounded.Fullscreen
+-import androidx.compose.material.icons.rounded.Movie
+-import androidx.compose.material.icons.rounded.PlayArrow
+-import androidx.compose.material.icons.rounded.Share
+-import androidx.compose.material.icons.rounded.VolumeOff
+-import androidx.compose.material.icons.rounded.VolumeUp
+-import androidx.compose.material3.Icon
+-import androidx.compose.material3.MaterialTheme
+-import androidx.compose.material3.Text
+-import androidx.compose.runtime.Composable
+-import androidx.compose.runtime.DisposableEffect
+-import androidx.compose.runtime.LaunchedEffect
+-import androidx.compose.runtime.getValue
+-import androidx.compose.runtime.mutableFloatStateOf
+-import androidx.compose.runtime.mutableStateOf
+-import androidx.compose.runtime.remember
+-import androidx.compose.runtime.rememberCoroutineScope
+-import androidx.compose.runtime.rememberUpdatedState
+-import androidx.compose.runtime.saveable.rememberSaveable
+-import androidx.compose.runtime.setValue
+-import androidx.compose.ui.Alignment
+-import androidx.compose.ui.Modifier
+-import androidx.compose.ui.draw.alpha
+-import androidx.compose.ui.draw.blur
+-import androidx.compose.ui.draw.clip
+-import androidx.compose.ui.graphics.Brush
+-import androidx.compose.ui.graphics.Color
+-import androidx.compose.ui.graphics.graphicsLayer
+-import androidx.compose.ui.graphics.vector.ImageVector
+-import androidx.compose.ui.input.pointer.pointerInput
+-import androidx.compose.ui.platform.LocalContext
+-import androidx.compose.ui.platform.LocalView
+-import androidx.compose.ui.semantics.Role
+-import androidx.compose.ui.text.style.TextOverflow
+-import androidx.compose.ui.unit.dp
+-import androidx.compose.ui.unit.sp
+-import androidx.compose.ui.viewinterop.AndroidView
+-import androidx.hilt.navigation.compose.hiltViewModel
+-import androidx.lifecycle.Lifecycle
+-import androidx.lifecycle.ViewModel
+-import androidx.lifecycle.compose.LifecycleEventEffect
+-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+-import androidx.lifecycle.viewModelScope
+-import androidx.media3.common.AudioAttributes
+-import androidx.media3.common.C
+-import androidx.media3.common.MediaItem
+-import androidx.media3.common.Player
+-import androidx.media3.common.VideoSize
+-import androidx.media3.common.util.UnstableApi
+-import androidx.media3.exoplayer.ExoPlayer
+-import com.vortexx.player.core.permissions.MediaPermissions
+-import com.vortexx.player.core.permissions.VideoAccess
+-import com.vortexx.player.core.permissions.rememberPermissionGroupState
+-import com.vortexx.player.core.util.Format
+-import com.vortexx.player.data.library.MediaLibraryRepository
+-import com.vortexx.player.data.repo.FavoritesRepository
+-import com.vortexx.player.domain.library.LibraryLogic
+-import com.vortexx.player.domain.model.LibraryState
+-import com.vortexx.player.domain.model.Video
+-import com.vortexx.player.feature.music.ScreenStatus
+-import com.vortexx.player.ui.designsystem.components.EmptyState
+-import com.vortexx.player.ui.designsystem.components.ErrorState
+-import com.vortexx.player.ui.designsystem.components.LoadingState
+-import com.vortexx.player.ui.designsystem.components.PermissionState
+-import com.vortexx.player.ui.designsystem.components.ProgressLine
+-import com.vortexx.player.ui.designsystem.components.ScreenMargin
+-import com.vortexx.player.ui.designsystem.components.VideoThumbnail
+-import com.vortexx.player.ui.designsystem.components.VortexMark
+-import com.vortexx.player.ui.designsystem.theme.VortexColors
+-import com.vortexx.player.ui.designsystem.theme.VortexSpacing
+-import dagger.hilt.android.lifecycle.HiltViewModel
+-import kotlinx.coroutines.Dispatchers
+-import kotlinx.coroutines.delay
+-import kotlinx.coroutines.flow.MutableStateFlow
+-import kotlinx.coroutines.flow.SharingStarted
+-import kotlinx.coroutines.flow.StateFlow
+-import kotlinx.coroutines.flow.asStateFlow
+-import kotlinx.coroutines.flow.combine
+-import kotlinx.coroutines.flow.flowOn
+-import kotlinx.coroutines.flow.stateIn
+-import kotlinx.coroutines.launch
+-import javax.inject.Inject
+-import javax.inject.Singleton
+-
+-/** Videos up to this long are Shorts. */
+-const val SHORTS_MAX_DURATION_MS = 3L * 60L * 1000L
+-
+-/** The Shorts feed: videos on this phone of up to three minutes, newest first. */
+-fun shortsFrom(videos: List<Video>): List<Video> =
+-    videos.filter { it.durationMs in 1..SHORTS_MAX_DURATION_MS }.sortedByDescending { it.dateAddedSec }
+-
+-/** Lets another screen (Home) open Shorts at one particular video. */
+-@Singleton
+-class ShortsLaunch @Inject constructor() {
+-    private val _startId = MutableStateFlow<Long?>(null)
+-    val startId: StateFlow<Long?> = _startId.asStateFlow()
+-
+-    fun request(videoId: Long) {
+-        _startId.value = videoId
+-    }
+-
+-    fun consume() {
+-        _startId.value = null
+-    }
+-}
+-
+-data class ShortsUiState(
+-    val status: ScreenStatus = ScreenStatus.Loading,
+-    val shorts: List<Video> = emptyList(),
+-    val liked: Set<Long> = emptySet(),
+-)
+-
+-@HiltViewModel
+-class ShortsViewModel @Inject constructor(
+-    private val library: MediaLibraryRepository,
+-    private val favorites: FavoritesRepository,
+-    val launch: ShortsLaunch,
+-) : ViewModel() {
+-
+-    val uiState: StateFlow<ShortsUiState> = combine(library.videos, favorites.favoriteVideoIdSet) { videos, liked ->
+-        when (videos) {
+-            LibraryState.Loading -> ShortsUiState(ScreenStatus.Loading)
+-            is LibraryState.Failed -> ShortsUiState(ScreenStatus.Failed(videos.message))
+-            is LibraryState.Ready -> ShortsUiState(ScreenStatus.Ready, shortsFrom(videos.data), liked)
+-        }
+-    }
+-        .flowOn(Dispatchers.Default)
+-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), ShortsUiState())
+-
+-    fun toggleLike(videoId: Long) {
+-        viewModelScope.launch { favorites.toggleVideo(videoId) }
+-    }
+-
+-    fun refresh() = library.refresh()
+-}
+-
+-/**
+- * Shorts: a vertical feed of the short videos on this phone. Swipe up for the
+- * next one, tap to pause, double-tap to like. One player is shared by all pages.
+- */
+-@Composable
+-fun ShortsScreen(
+-    onOpenInPlayer: (Video) -> Unit,
+-    viewModel: ShortsViewModel = hiltViewModel(),
+-) {
+-    val permission = rememberPermissionGroupState(
+-        permissions = MediaPermissions.video,
+-        isGranted = { it.video != VideoAccess.None },
+-        onResult = { granted -> if (granted) viewModel.refresh() },
+-    )
+-    val state by viewModel.uiState.collectAsStateWithLifecycle()
+-
+-    Box(
+-        Modifier
+-            .fillMaxSize()
+-            .background(Color.Black),
+-    ) {
+-        val status = state.status
+-        when {
+-            !permission.granted -> PermissionState(
+-                title = "Allow access to videos",
+-                message = "Shorts plays the short videos saved on this phone. VORTEX X needs the Photos & videos permission to find them.",
+-                permanentlyDenied = permission.permanentlyDenied,
+-                onRequest = permission::request,
+-                onOpenSettings = permission::openAppSettings,
+-            )
+-            status is ScreenStatus.Failed -> ErrorState("Couldn't read videos", status.message, onRetry = viewModel::refresh)
+-            status == ScreenStatus.Loading -> LoadingState("Finding short videos…")
+-            state.shorts.isEmpty() -> EmptyState(
+-                icon = Icons.Rounded.Movie,
+-                title = "No short videos yet",
+-                message = "Videos of up to 3 minutes on this phone appear here. Record one or save one to this phone, then scan again.",
+-                actionLabel = "Scan again",
+-                onAction = viewModel::refresh,
+-            )
+-            else -> ShortsPager(
+-                shorts = state.shorts,
+-                liked = state.liked,
+-                launch = viewModel.launch,
+-                onToggleLike = viewModel::toggleLike,
+-                onOpenInPlayer = onOpenInPlayer,
+-            )
+-        }
+-
+-        Row(
+-            Modifier
+-                .fillMaxWidth()
+-                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)))
+-                .statusBarsPadding()
+-                .padding(horizontal = ScreenMargin, vertical = VortexSpacing.md),
+-            verticalAlignment = Alignment.CenterVertically,
+-        ) {
+-            VortexMark(size = 24.dp)
+-            Spacer(Modifier.width(10.dp))
+-            Text("Shorts", style = MaterialTheme.typography.titleLarge, color = Color.White)
+-            Spacer(Modifier.weight(1f))
+-            if (state.shorts.isNotEmpty()) {
+-                Text(
+-                    LibraryLogic.pluralize(state.shorts.size, "video"),
+-                    style = MaterialTheme.typography.labelMedium,
+-                    color = Color.White.copy(alpha = 0.75f),
+-                )
+-            }
+-        }
+-    }
+-}
+-
+-@androidx.annotation.OptIn(UnstableApi::class)
+-@OptIn(ExperimentalFoundationApi::class)
+-@Composable
+-private fun ShortsPager(
+-    shorts: List<Video>,
+-    liked: Set<Long>,
+-    launch: ShortsLaunch,
+-    onToggleLike: (Long) -> Unit,
+-    onOpenInPlayer: (Video) -> Unit,
+-) {
+-    val context = LocalContext.current
+-    val pagerState = rememberPagerState(pageCount = { shorts.size })
+-    val player = remember {
+-        ExoPlayer.Builder(context)
+-            .setAudioAttributes(
+-                AudioAttributes.Builder()
+-                    .setUsage(C.USAGE_MEDIA)
+-                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+-                    .build(),
+-                /* handleAudioFocus = */ true,
+-            )
+-            .setHandleAudioBecomingNoisy(true)
+-            .build()
+-            .apply { repeatMode = Player.REPEAT_MODE_ONE }
+-    }
+-    var muted by rememberSaveable { mutableStateOf(false) }
+-    var userPaused by remember { mutableStateOf(false) }
+-    var firstFrame by remember { mutableStateOf(false) }
+-    var aspect by remember { mutableFloatStateOf(0f) }
+-    var progress by remember { mutableFloatStateOf(0f) }
+-
+-    DisposableEffect(player) {
+-        val listener = object : Player.Listener {
+-            override fun onRenderedFirstFrame() {
+-                firstFrame = true
+-            }
+-
+-            override fun onVideoSizeChanged(videoSize: VideoSize) {
+-                if (videoSize.width > 0 && videoSize.height > 0) {
+-                    aspect = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height
+-                }
+-            }
+-        }
+-        player.addListener(listener)
+-        onDispose {
+-            player.removeListener(listener)
+-            player.release()
+-        }
+-    }
+-
+-    // Home can ask for one particular short.
+-    val startId by launch.startId.collectAsStateWithLifecycle()
+-    LaunchedEffect(startId, shorts) {
+-        val id = startId ?: return@LaunchedEffect
+-        val index = shorts.indexOfFirst { it.id == id }
+-        if (index >= 0) pagerState.scrollToPage(index)
+-        launch.consume()
+-    }
+-
+-    val current = shorts.getOrNull(pagerState.settledPage)
+-    LaunchedEffect(current?.id) {
+-        val video = current ?: return@LaunchedEffect
+-        firstFrame = false
+-        aspect = 0f
+-        progress = 0f
+-        userPaused = false
+-        player.setMediaItem(MediaItem.fromUri(video.contentUri))
+-        player.prepare()
+-        player.playWhenReady = true
+-        while (true) {
+-            val duration = player.duration
+-            progress = if (duration > 0) (player.currentPosition.toFloat() / duration).coerceIn(0f, 1f) else 0f
+-            delay(120)
+-        }
+-    }
+-    LaunchedEffect(muted) { player.volume = if (muted) 0f else 1f }
+-
+-    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { player.pause() }
+-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { if (!userPaused) player.play() }
+-
+-    val view = LocalView.current
+-    DisposableEffect(view) {
+-        view.keepScreenOn = true
+-        onDispose { view.keepScreenOn = false }
+-    }
+-
+-    VerticalPager(
+-        state = pagerState,
+-        modifier = Modifier.fillMaxSize(),
+-        key = { index -> shorts.getOrNull(index)?.id ?: index.toLong() },
+-    ) { page ->
+-        val video = shorts[page]
+-        val isCurrent = page == pagerState.settledPage
+-        ShortPage(
+-            video = video,
+-            isCurrent = isCurrent,
+-            player = player,
+-            showVideo = isCurrent && firstFrame,
+-            aspect = if (isCurrent) aspect else 0f,
+-            paused = isCurrent && userPaused,
+-            muted = muted,
+-            liked = video.id in liked,
+-            progress = if (isCurrent) progress else 0f,
+-            onTogglePlay = {
+-                if (player.isPlaying) {
+-                    userPaused = true
+-                    player.pause()
+-                } else {
+-                    userPaused = false
+-                    player.play()
+-                }
+-            },
+-            onToggleMute = { muted = !muted },
+-            onToggleLike = { onToggleLike(video.id) },
+-            onShare = { shareVideo(context, video) },
+-            onOpenInPlayer = {
+-                player.pause()
+-                onOpenInPlayer(video)
+-            },
+-        )
+-    }
+-}
+-
+-@Composable
+-private fun ShortPage(
+-    video: Video,
+-    isCurrent: Boolean,
+-    player: ExoPlayer,
+-    showVideo: Boolean,
+-    aspect: Float,
+-    paused: Boolean,
+-    muted: Boolean,
+-    liked: Boolean,
+-    progress: Float,
+-    onTogglePlay: () -> Unit,
+-    onToggleMute: () -> Unit,
+-    onToggleLike: () -> Unit,
+-    onShare: () -> Unit,
+-    onOpenInPlayer: () -> Unit,
+-) {
+-    val togglePlay by rememberUpdatedState(onTogglePlay)
+-    val toggleLike by rememberUpdatedState(onToggleLike)
+-    val isLiked by rememberUpdatedState(liked)
+-    val heart = remember { Animatable(0f) }
+-    val scope = rememberCoroutineScope()
+-
+-    Box(
+-        Modifier
+-            .fillMaxSize()
+-            .background(Color.Black)
+-            .pointerInput(video.id) {
+-                detectTapGestures(
+-                    onTap = { togglePlay() },
+-                    onDoubleTap = {
+-                        if (!isLiked) toggleLike()
+-                        scope.launch {
+-                            heart.snapTo(0f)
+-                            heart.animateTo(1f, tween(durationMillis = 560))
+-                            heart.snapTo(0f)
+-                        }
+-                    },
+-                )
+-            },
+-    ) {
+-        // Soft backdrop so letterboxed clips do not sit on plain black (blur needs Android 12+).
+-        VideoThumbnail(
+-            video,
+-            Modifier
+-                .fillMaxSize()
+-                .blur(28.dp)
+-                .alpha(0.4f),
+-            cornerRadius = 0.dp,
+-        )
+-
+-        if (isCurrent) {
+-            AndroidView(
+-                factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
+-                onRelease = { player.clearVideoTextureView(it) },
+-                modifier = Modifier
+-                    .align(Alignment.Center)
+-                    .aspectRatio(if (aspect > 0f) aspect else 9f / 16f),
+-            )
+-        }
+-
+-        // Poster until the first frame is on screen.
+-        AnimatedVisibility(
+-            visible = !showVideo,
+-            enter = fadeIn(tween(0)),
+-            exit = fadeOut(tween(220)),
+-            modifier = Modifier.fillMaxSize(),
+-        ) {
+-            VideoThumbnail(video, Modifier.fillMaxSize(), cornerRadius = 0.dp, initialsSize = 72.sp)
+-        }
+-
+-        Box(
+-            Modifier
+-                .align(Alignment.BottomCenter)
+-                .fillMaxWidth()
+-                .height(260.dp)
+-                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f)))),
+-        )
+-
+-        if (paused) {
+-            Box(
+-                Modifier
+-                    .align(Alignment.Center)
+-                    .size(84.dp)
+-                    .clip(CircleShape)
+-                    .background(Color.Black.copy(alpha = 0.5f)),
+-                contentAlignment = Alignment.Center,
+-            ) {
+-                Icon(Icons.Rounded.PlayArrow, contentDescription = "Paused", tint = Color.White, modifier = Modifier.size(52.dp))
+-            }
+-        }
+-
+-        Icon(
+-            Icons.Rounded.Favorite,
+-            contentDescription = null,
+-            tint = VortexColors.Accent,
+-            modifier = Modifier
+-                .align(Alignment.Center)
+-                .size(128.dp)
+-                .graphicsLayer {
+-                    val t = heart.value
+-                    alpha = when {
+-                        t <= 0f -> 0f
+-                        t < 0.2f -> t / 0.2f
+-                        else -> 1f - (t - 0.2f) / 0.8f
+-                    }
+-                    val s = 0.6f + 0.7f * t
+-                    scaleX = s
+-                    scaleY = s
+-                },
+-        )
+-
+-        Column(
+-            Modifier
+-                .align(Alignment.BottomEnd)
+-                .padding(end = VortexSpacing.sm, bottom = 28.dp),
+-            horizontalAlignment = Alignment.CenterHorizontally,
+-            verticalArrangement = Arrangement.spacedBy(VortexSpacing.sm),
+-        ) {
+-            ShortAction(
+-                icon = if (liked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+-                label = if (liked) "Liked" else "Like",
+-                description = if (liked) "Remove like" else "Like",
+-                tint = if (liked) VortexColors.Accent else Color.White,
+-                onClick = onToggleLike,
+-            )
+-            ShortAction(
+-                icon = if (muted) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
+-                label = if (muted) "Muted" else "Sound",
+-                description = if (muted) "Turn sound on" else "Mute",
+-                onClick = onToggleMute,
+-            )
+-            ShortAction(icon = Icons.Rounded.Share, label = "Share", description = "Share video", onClick = onShare)
+-            ShortAction(icon = Icons.Rounded.Fullscreen, label = "Player", description = "Open in the video player", onClick = onOpenInPlayer)
+-        }
+-
+-        Column(
+-            Modifier
+-                .align(Alignment.BottomStart)
+-                .fillMaxWidth()
+-                .padding(start = ScreenMargin, end = 84.dp, bottom = 20.dp),
+-        ) {
+-            Text(
+-                video.title,
+-                style = MaterialTheme.typography.titleMedium,
+-                color = Color.White,
+-                maxLines = 2,
+-                overflow = TextOverflow.Ellipsis,
+-            )
+-            Text(
+-                "${Format.duration(video.durationMs)} · ${LibraryLogic.folderDisplayName(video.folder)}",
+-                style = MaterialTheme.typography.bodySmall,
+-                color = Color.White.copy(alpha = 0.78f),
+-                maxLines = 1,
+-                overflow = TextOverflow.Ellipsis,
+-            )
+-        }
+-
+-        ProgressLine(
+-            fraction = progress,
+-            height = 3.dp,
+-            modifier = Modifier.align(Alignment.BottomCenter),
+-        )
+-    }
+-}
+-
+-@Composable
+-private fun ShortAction(
+-    icon: ImageVector,
+-    label: String,
+-    description: String,
+-    onClick: () -> Unit,
+-    tint: Color = Color.White,
+-) {
+-    Column(
+-        Modifier
+-            .clip(RoundedCornerShape(14.dp))
+-            .clickable(role = Role.Button, onClickLabel = description, onClick = onClick)
+-            .padding(horizontal = 6.dp, vertical = 4.dp),
+-        horizontalAlignment = Alignment.CenterHorizontally,
+-    ) {
+-        Box(
+-            Modifier
+-                .size(48.dp)
+-                .clip(CircleShape)
+-                .background(Color.Black.copy(alpha = 0.4f)),
+-            contentAlignment = Alignment.Center,
+-        ) {
+-            Icon(icon, contentDescription = description, tint = tint, modifier = Modifier.size(26.dp))
+-        }
+-        Spacer(Modifier.height(2.dp))
+-        Text(label, style = MaterialTheme.typography.labelSmall, color = Color.White)
+-    }
+-}
+-
+-private fun shareVideo(context: Context, video: Video) {
+-    val send = Intent(Intent.ACTION_SEND).apply {
+-        type = video.mimeType ?: "video/*"
+-        putExtra(Intent.EXTRA_STREAM, Uri.parse(video.contentUri))
+-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+-    }
+-    runCatching { context.startActivity(Intent.createChooser(send, "Share video")) }
+-}
+diff --git a/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt b/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt
+index e9d00cd..f75c868 100644
+--- a/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt
++++ b/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt
+@@ -1,8 +1,5 @@
+ package com.vortexx.player.ui.app
+ 
+-import com.vortexx.player.ui.navigation.ShortsRoute
+-import androidx.compose.material.icons.rounded.PlayCircleFilled
+-import androidx.compose.material.icons.outlined.PlayCircleOutline
+ import androidx.compose.animation.animateColorAsState
+ import androidx.compose.animation.core.animateDpAsState
+ import androidx.compose.animation.core.tween
+@@ -86,14 +83,13 @@ data class TopLevelDestination(
+ )
+ 
+ /**
+- * Home | Music | Video | Shorts | You (decision D14). Playlists, favourites and
++ * Home | Music | Video | You. Playlists, favourites and
+  * folders open from You and from the Music header; Downloads arrives with M3.
+  */
+ val PrimaryDestinations = listOf(
+     TopLevelDestination(HomeRoute, "Home", Icons.Outlined.Home, Icons.Rounded.Home, listOf(HomeRoute::class)),
+     TopLevelDestination(MusicRoute, "Music", Icons.Outlined.LibraryMusic, Icons.Rounded.LibraryMusic, listOf(MusicRoute::class, CollectionRoute::class)),
+     TopLevelDestination(VideosRoute, "Video", Icons.Outlined.VideoLibrary, Icons.Rounded.VideoLibrary, listOf(VideosRoute::class)),
+-    TopLevelDestination(ShortsRoute, "Shorts", Icons.Outlined.PlayCircleOutline, Icons.Rounded.PlayCircleFilled, listOf(ShortsRoute::class)),
+     TopLevelDestination(
+         YouRoute,
+         "You",
+diff --git a/app/src/main/java/com/vortexx/player/ui/app/VortexAppRoot.kt b/app/src/main/java/com/vortexx/player/ui/app/VortexAppRoot.kt
+index 5438a12..4e3ed1f 100644
+--- a/app/src/main/java/com/vortexx/player/ui/app/VortexAppRoot.kt
++++ b/app/src/main/java/com/vortexx/player/ui/app/VortexAppRoot.kt
+@@ -1,6 +1,5 @@
+ package com.vortexx.player.ui.app
+ 
+-import com.vortexx.player.ui.navigation.ShortsRoute
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.layout.BoxWithConstraints
+ import androidx.compose.foundation.layout.Column
+@@ -95,8 +94,6 @@ fun VortexAppRoot(
+     val backStackEntry by navController.currentBackStackEntryAsState()
+     val destination = backStackEntry?.destination
+     val fullScreen = destination.isOn(NowPlayingRoute::class) || destination.isOn(VideoPlayerRoute::class)
+-    // Shorts has its own sound; the mini player would only show the music it paused.
+-    val onShorts = destination.isOn(ShortsRoute::class)
+ 
+     CompositionLocalProvider(LocalSnackbarHostState provides snackbarHostState) {
+         BoxWithConstraints(
+@@ -123,7 +120,7 @@ fun VortexAppRoot(
+                     bottomBar = {
+                         if (!fullScreen) {
+                             Column {
+-                                if (playbackState.nowPlaying != null && !onShorts) {
++                                if (playbackState.nowPlaying != null) {
+                                     MiniPlayerHost(
+                                         state = playbackState,
+                                         position = viewModel.position,
+@@ -123,7 +120,7 @@ fun VortexAppRoot(
+diff --git a/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt b/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt
+index 32423ce..5854126 100644
+--- a/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt
++++ b/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt
+@@ -19,9 +19,6 @@ import kotlinx.serialization.Serializable
+ /** The You hub: Audio Lab, settings, tools and app information. */
+ @Serializable data object YouRoute
+ 
+-/** Shorts: swipe through the short videos on this phone. */
+-@Serializable data object ShortsRoute
+-
+ /** Album / artist / genre / folder detail. [type] is a CollectionType name. */
+ @Serializable data class CollectionRoute(val type: String, val key: String, val title: String)
+ 
+diff --git a/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt b/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
+index d1d0e18..3aa0f13 100644
+--- a/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
++++ b/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
+@@ -1,7 +1,6 @@
+ package com.vortexx.player.ui.navigation
+ 
+ import com.vortexx.player.ui.app.navigateTopLevel
+-import com.vortexx.player.feature.shorts.ShortsScreen
+ import androidx.compose.animation.fadeIn
+ import androidx.compose.animation.fadeOut
+ import androidx.compose.animation.core.tween
+@@ -41,7 +40,7 @@ fun VortexNavHost(
+     }
+     val openNowPlaying: () -> Unit = { navController.navigate(NowPlayingRoute) { launchSingleTop = true } }
+     // Tabs open the way the bottom bar opens them (state kept per tab); other screens are pushed.
+-    val tabRoutes = setOf<Any>(HomeRoute, MusicRoute, VideosRoute, ShortsRoute, YouRoute)
++    val tabRoutes = setOf<Any>(HomeRoute, MusicRoute, VideosRoute, YouRoute)
+     val navigate: (Any) -> Unit = { route ->
+         if (route in tabRoutes) navController.navigateTopLevel(route) else navController.navigate(route) { launchSingleTop = true }
+     }
+@@ -150,9 +149,6 @@ fun VortexNavHost(
+                 YouScreen(onNavigate = navigate)
+             }
+         }
+-        composable<ShortsRoute> {
+-            ShortsScreen(onOpenInPlayer = playVideo)
+-        }
+         composable<SettingsRoute> {
+             AdaptiveWidth(VortexWidths.Reading) {
+                 SettingsScreen(
+@@ -150,9 +149,6 @@ fun VortexNavHost(
+diff --git a/app/src/test/java/com/vortexx/player/M1ScreenLogicTest.kt b/app/src/test/java/com/vortexx/player/M1ScreenLogicTest.kt
+index dbd26c1..4a16018 100644
+--- a/app/src/test/java/com/vortexx/player/M1ScreenLogicTest.kt
++++ b/app/src/test/java/com/vortexx/player/M1ScreenLogicTest.kt
+@@ -2,8 +2,6 @@ package com.vortexx.player
+ 
+ import com.vortexx.player.domain.model.Video
+ import com.vortexx.player.feature.home.greetingFor
+-import com.vortexx.player.feature.shorts.SHORTS_MAX_DURATION_MS
+-import com.vortexx.player.feature.shorts.shortsFrom
+ import com.vortexx.player.feature.video.CINEMA_MIN_DURATION_MS
+ import com.vortexx.player.feature.video.VideoItemUi
+ import com.vortexx.player.feature.video.VideoTab
+@@ -11,7 +9,7 @@ import com.vortexx.player.feature.video.videosForTab
+ import org.junit.Assert.assertEquals
+ import org.junit.Test
+ 
+-/** Rules behind the screens: the Home greeting, the Video tabs and the Shorts feed. */
++/** Rules behind the screens: the Home greeting and the Video tabs. */
+ class M1ScreenLogicTest {
+ 
+     @Test
+@@ -42,17 +40,6 @@ class M1ScreenLogicTest {
+         folder = "/storage/emulated/0/Movies",
+     )
+ 
+-    @Test
+-    fun shortsAreVideosUpToThreeMinutesNewestFirst() {
+-        val clip = video(1, 20_000L)
+-        val exactlyThreeMinutes = video(5, SHORTS_MAX_DURATION_MS)
+-        val longer = video(7, SHORTS_MAX_DURATION_MS + 1)
+-        val unknownLength = video(9, 0L)
+-        // dateAddedSec equals the id in this fixture, so the newest is the highest id.
+-        assertEquals(listOf(exactlyThreeMinutes, clip), shortsFrom(listOf(clip, longer, unknownLength, exactlyThreeMinutes)))
+-        assertEquals(emptyList<Video>(), shortsFrom(emptyList()))
+-    }
+-
+     @Test
+     fun videoTabsFilterWithoutReordering() {
+         val short = VideoItemUi(video(1, 5 * 60_000L), watchedFraction = null)
