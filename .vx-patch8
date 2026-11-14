@@ -1,0 +1,158 @@
+diff --git a/app/src/main/java/com/vortexx/player/audio/engine/AudioFormatLabels.kt b/app/src/main/java/com/vortexx/player/audio/engine/AudioFormatLabels.kt
+index fe2cc0c..7e20faf 100644
+--- a/app/src/main/java/com/vortexx/player/audio/engine/AudioFormatLabels.kt
++++ b/app/src/main/java/com/vortexx/player/audio/engine/AudioFormatLabels.kt
+@@ -18,11 +18,11 @@ object AudioFormatLabels {
+         "audio/opus" -> "Opus"
+         "audio/vorbis" -> "Vorbis"
+         "audio/raw" -> "PCM"
+-        "audio/ac3" -> "Dolby Digital (AC-3)"
+-        "audio/eac3" -> "Dolby Digital Plus (E-AC-3)"
+-        "audio/eac3-joc" -> "Dolby Digital Plus JOC"
+-        "audio/ac4" -> "Dolby AC-4"
+-        "audio/true-hd" -> "Dolby TrueHD"
++        "audio/ac3" -> "AC-3"
++        "audio/eac3" -> "E-AC-3"
++        "audio/eac3-joc" -> "E-AC-3 JOC"
++        "audio/ac4" -> "AC-4"
++        "audio/true-hd" -> "TrueHD"
+         "audio/vnd.dts" -> "DTS"
+         "audio/vnd.dts.hd" -> "DTS-HD"
+         "audio/amr-wb" -> "AMR-WB"
+diff --git a/app/src/main/java/com/vortexx/player/audio/engine/DecoderPack.kt b/app/src/main/java/com/vortexx/player/audio/engine/DecoderPack.kt
+index 041feb9..10cb399 100644
+--- a/app/src/main/java/com/vortexx/player/audio/engine/DecoderPack.kt
++++ b/app/src/main/java/com/vortexx/player/audio/engine/DecoderPack.kt
+@@ -15,11 +15,11 @@ object DecoderPack {
+ 
+     /** Formats the pack is built for (see .github/scripts/ci-ffmpeg.sh). */
+     val Formats = listOf(
+-        AudioFormat("Dolby Digital (AC-3)", "audio/ac3"),
+-        AudioFormat("Dolby Digital Plus (E-AC-3)", "audio/eac3"),
++        AudioFormat("AC-3", "audio/ac3"),
++        AudioFormat("E-AC-3", "audio/eac3"),
+         AudioFormat("DTS", "audio/vnd.dts"),
+         AudioFormat("DTS-HD", "audio/vnd.dts.hd"),
+-        AudioFormat("Dolby TrueHD", "audio/true-hd"),
++        AudioFormat("TrueHD", "audio/true-hd"),
+         AudioFormat("ALAC", "audio/alac"),
+         AudioFormat("FLAC", "audio/flac"),
+         AudioFormat("Opus", "audio/opus"),
+diff --git a/app/src/main/java/com/vortexx/player/audio/media3/AudioEncodings.kt b/app/src/main/java/com/vortexx/player/audio/media3/AudioEncodings.kt
+index 41387e4..f37553a 100644
+--- a/app/src/main/java/com/vortexx/player/audio/media3/AudioEncodings.kt
++++ b/app/src/main/java/com/vortexx/player/audio/media3/AudioEncodings.kt
+@@ -17,7 +17,7 @@ object AudioEncodings {
+         C.ENCODING_AC4 -> "AC-4"
+         C.ENCODING_DTS -> "DTS"
+         C.ENCODING_DTS_HD -> "DTS-HD"
+-        C.ENCODING_DOLBY_TRUEHD -> "Dolby TrueHD"
++        C.ENCODING_DOLBY_TRUEHD -> "TrueHD"
+         C.ENCODING_MP3 -> "MP3"
+         C.ENCODING_AAC_LC -> "AAC-LC"
+         C.ENCODING_INVALID -> "Invalid"
+diff --git a/app/src/main/java/com/vortexx/player/core/capabilities/DeviceCapabilities.kt b/app/src/main/java/com/vortexx/player/core/capabilities/DeviceCapabilities.kt
+index 43b3090..4804603 100644
+--- a/app/src/main/java/com/vortexx/player/core/capabilities/DeviceCapabilities.kt
++++ b/app/src/main/java/com/vortexx/player/core/capabilities/DeviceCapabilities.kt
+@@ -90,7 +90,7 @@ class DeviceCapabilities @Inject constructor(
+ 
+     fun videoFormats(): List<FormatSupport> = probe(VIDEO_FORMATS)
+ 
+-    /** Formats relevant to immersive / Dolby-family playback. */
++    /** Formats relevant to immersive (object-based) playback. */
+     fun immersiveFormats(): List<FormatSupport> = probe(IMMERSIVE_FORMATS)
+ 
+     private fun probe(formats: List<Pair<String, String>>): List<FormatSupport> {
+@@ -174,7 +174,7 @@ class DeviceCapabilities @Inject constructor(
+         }
+         return types.map { type ->
+             when (type) {
+-                1 -> "Dolby Vision"
++                1 -> "DV (proprietary HDR)"
+                 2 -> "HDR10"
+                 3 -> "HLG"
+                 4 -> "HDR10+"
+@@ -246,7 +246,7 @@ class DeviceCapabilities @Inject constructor(
+             "AV1" to "video/av01",
+             "VP8" to "video/x-vnd.on2.vp8",
+             "MPEG-4 Part 2" to "video/mp4v-es",
+-            "Dolby Vision" to "video/dolby-vision",
++            "DV (proprietary HDR)" to "video/dolby-vision",
+         )
+ 
+         val IMMERSIVE_FORMATS = listOf(
+@@ -293,10 +293,10 @@ class DeviceCapabilities @Inject constructor(
+             AudioFormat.ENCODING_DTS -> "DTS"
+             AudioFormat.ENCODING_DTS_HD -> "DTS-HD"
+             AudioFormat.ENCODING_IEC61937 -> "IEC 61937"
+-            14 -> "Dolby TrueHD"
++            14 -> "TrueHD"
+             17 -> "AC-4"
+             18 -> "E-AC-3 JOC"
+-            19 -> "Dolby MAT"
++            19 -> "MAT"
+             20 -> "Opus"
+             else -> "Encoding $encoding"
+         }
+diff --git a/app/src/main/java/com/vortexx/player/data/settings/SettingsCatalog.kt b/app/src/main/java/com/vortexx/player/data/settings/SettingsCatalog.kt
+index 736a9f7..9f7b095 100644
+--- a/app/src/main/java/com/vortexx/player/data/settings/SettingsCatalog.kt
++++ b/app/src/main/java/com/vortexx/player/data/settings/SettingsCatalog.kt
+@@ -93,7 +93,7 @@ object SettingsCatalog {
+         SettingDefinition(
+             SettingId.OpenDiagnostics, SettingsCategory.Developer,
+             "Audio and video diagnostics", "Decoder, HDR, spatial audio and output reports",
+-            SettingsMode.Pro, listOf("codec", "decoder", "hdr", "dolby", "spatial", "report"),
++            SettingsMode.Pro, listOf("codec", "decoder", "hdr", "ac3", "spatial", "report"),
+         ),
+         SettingDefinition(
+             SettingId.VerboseLogging, SettingsCategory.Developer,
+diff --git a/app/src/main/java/com/vortexx/player/feature/diagnostics/DiagnosticsScreen.kt b/app/src/main/java/com/vortexx/player/feature/diagnostics/DiagnosticsScreen.kt
+index 14ec42b..c32c9f9 100644
+--- a/app/src/main/java/com/vortexx/player/feature/diagnostics/DiagnosticsScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/diagnostics/DiagnosticsScreen.kt
+@@ -72,14 +72,14 @@ data class DiagnosticsReport(
+     val duplicateGroups: Int?,
+     val decoderPack: DecoderPack.Status? = null,
+ ) {
+-    /** Honest one-line verdict about object-based (Atmos-family) audio on this device. */
++    /** Honest one-line verdict about object-based audio (E-AC-3 JOC, AC-4) on this device. */
+     val immersiveVerdict: String
+         get() {
+             val joc = immersive.firstOrNull { it.mime == "audio/eac3-joc" }?.supported == true
+             val ac4 = immersive.firstOrNull { it.mime == "audio/ac4" }?.supported == true
+-            val passthrough = outputs.any { o -> o.encodings.any { it == "E-AC-3 JOC" || it == "Dolby TrueHD" || it == "Dolby MAT" } }
++            val passthrough = outputs.any { o -> o.encodings.any { it == "E-AC-3 JOC" || it == "TrueHD" || it == "MAT" } }
+             return when {
+-                joc || ac4 -> "This device has a decoder for object-based Dolby-family audio. Native immersive playback still depends on the content and the output device."
++                joc || ac4 -> "This device has a decoder for object-based audio (E-AC-3 JOC or AC-4). Native immersive playback still depends on the content and the output device."
+                 passthrough -> "No on-device object-audio decoder, but the current output accepts encoded object audio (passthrough)."
+                 else -> "No object-based audio decoder or passthrough output detected. Immersive tracks fall back to their stereo or multichannel bed."
+             }
+diff --git a/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt b/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt
+index 5310b7c..657ed4e 100644
+--- a/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt
+@@ -347,7 +347,7 @@ fun StudioScreen(
+             }
+             item(key = "scope") {
+                 Text(
+-                    "The Audio Lab processes music playback. Video playback is not processed yet. VORTEX X's processing is its own stereo/multichannel DSP and is not Dolby or Atmos processing.",
++                    "The Audio Lab processes music playback. Video playback is not processed yet. VORTEX X's processing is its own stereo/multichannel DSP.",
+                     style = MaterialTheme.typography.bodySmall,
+                     color = VortexColors.TextSecondary,
+                     modifier = Modifier.padding(VortexSpacing.lg),
+diff --git a/app/src/test/java/com/vortexx/player/DisplayAndFormatLabelsTest.kt b/app/src/test/java/com/vortexx/player/DisplayAndFormatLabelsTest.kt
+index b6f20a0..29903af 100644
+--- a/app/src/test/java/com/vortexx/player/DisplayAndFormatLabelsTest.kt
++++ b/app/src/test/java/com/vortexx/player/DisplayAndFormatLabelsTest.kt
+@@ -31,7 +31,7 @@ class DisplayAndFormatLabelsTest {
+         assertEquals("FLAC · 44.1 kHz · Stereo · 905 kbps", AudioFormatLabels.describe(flac))
+         val mp3 = InputStreamInfo(mimeType = "audio/mpeg", codecs = null, sampleRate = 48_000, channelCount = 2, bitrate = -1)
+         assertEquals("MP3 · 48 kHz · Stereo", AudioFormatLabels.describe(mp3))
+-        assertEquals("Dolby Digital Plus JOC", AudioFormatLabels.codec("audio/eac3-joc"))
++        assertEquals("E-AC-3 JOC", AudioFormatLabels.codec("audio/eac3-joc"))
+         assertNull(AudioFormatLabels.describe(InputStreamInfo(null, null, -1, -1, -1)))
+         assertNull(AudioFormatLabels.describe(null))
+     }
