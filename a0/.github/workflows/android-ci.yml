@@ -1,0 +1,162 @@
+name: Android CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, test, and package debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      LOGS: ${{ github.workspace }}/ci-logs
+      VORTEX_DEBUG_STORE_PASSWORD: ${{ secrets.VORTEX_DEBUG_STORE_PASSWORD || 'android' }}
+      VORTEX_DEBUG_KEY_PASSWORD: ${{ secrets.VORTEX_DEBUG_KEY_PASSWORD || 'android' }}
+      VORTEX_DEBUG_KEY_ALIAS: ${{ secrets.VORTEX_DEBUG_KEY_ALIAS || 'androiddebugkey' }}
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare
+        run: |
+          chmod +x gradlew
+          mkdir -p "$LOGS"
+
+      # Each Gradle step keeps going on failure so the summary and logs are always
+      # produced; the last step fails the run if a required step failed.
+      # The GitHub-hosted Ubuntu image ships the Android SDK with licenses accepted;
+      # AGP downloads any missing platform (android-36) automatically.
+      - name: Restore original Phase 1 debug key when provided
+        env:
+          KEY_BASE64: ${{ secrets.VORTEX_PHASE1_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEY_BASE64" ]; then
+            umask 077
+            printf '%s' "$KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/vortex-phase1-debug.keystore"
+            echo "VORTEX_DEBUG_KEYSTORE=$RUNNER_TEMP/vortex-phase1-debug.keystore" >> "$GITHUB_ENV"
+          else
+            echo "Original debug key unavailable. Build/test can run; phone-update signing gate will fail."
+          fi
+
+      - name: Build debug APK
+        id: assemble
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./gradlew --stacktrace assembleDebug 2>&1 | tee "$LOGS/1-assembleDebug.log"
+
+      - name: Run JVM unit tests
+        id: unit
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          set +e
+          ./gradlew --stacktrace testDebugUnitTest 2>&1 | tee "$LOGS/2-testDebugUnitTest.log"
+          gradle_result=${PIPESTATUS[0]}
+          python3 .github/scripts/verify-jvm-reports.py 2>&1 | tee "$LOGS/jvm-gate.log"
+          report_result=${PIPESTATUS[0]}
+          if [ "$gradle_result" -ne 0 ] || [ "$report_result" -ne 0 ]; then exit 1; fi
+
+      - name: Compile instrumentation tests
+        id: androidtest
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./gradlew --stacktrace assembleDebugAndroidTest 2>&1 | tee "$LOGS/3-assembleDebugAndroidTest.log"
+
+      - name: Android lint (report only during Phase 1)
+        id: lint
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./gradlew lintDebug 2>&1 | tee "$LOGS/4-lintDebug.log"
+
+      - name: Verify package and Phase 1 signing compatibility
+        id: signing
+        if: steps.assemble.outcome == 'success'
+        continue-on-error: true
+        working-directory: .
+        run: |
+          set -o pipefail
+          python3 .github/scripts/verify-apk.py 2>&1 | tee "$LOGS/5-signing-gate.log"
+
+      - name: Upload APK eligible for phone verification
+        if: steps.assemble.outcome == 'success' && steps.unit.outcome == 'success' && steps.androidtest.outcome == 'success' && steps.signing.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vortex-x-a0-phone-candidate-apk
+          path: ./app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload compiled instrumentation APK (not execution evidence)
+        if: steps.androidtest.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vortex-x-a0-androidtest-apk
+          path: ./app/build/outputs/apk/androidTest/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write job summary
+        if: always()
+        env:
+          ASSEMBLE: ${{ steps.assemble.outcome }}
+          UNIT: ${{ steps.unit.outcome }}
+          ANDROIDTEST: ${{ steps.androidtest.outcome }}
+          SIGNING: ${{ steps.signing.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+        run: bash .github/scripts/ci-summary.sh "$GITHUB_WORKSPACE" "$LOGS"
+
+      - name: Upload logs and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vortex-x-logs-and-reports
+          path: |
+            ci-logs/
+            app/build/reports/
+            app/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Remove temporary debug signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/vortex-phase1-debug.keystore"
+
+      - name: Fail the run if a required step failed
+        if: always()
+        env:
+          ASSEMBLE: ${{ steps.assemble.outcome }}
+          UNIT: ${{ steps.unit.outcome }}
+          ANDROIDTEST: ${{ steps.androidtest.outcome }}
+          SIGNING: ${{ steps.signing.outcome }}
+        run: |
+          echo "assembleDebug=$ASSEMBLE testDebugUnitTest=$UNIT assembleDebugAndroidTest=$ANDROIDTEST"
+          if [ "$ASSEMBLE" != "success" ] || [ "$UNIT" != "success" ] || [ "$ANDROIDTEST" != "success" ] || [ "$SIGNING" != "success" ]; then
+            echo "::error::A0 gate failed. Inspect build, JVM/allocation, instrumentation compile and signing results."
+            exit 1
+          fi
