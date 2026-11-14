@@ -1,0 +1,350 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 6754658..a2f5fc1 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -11,6 +11,9 @@
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+     <uses-permission android:name="android.permission.WAKE_LOCK" />
+ 
++    <!-- Normal permission (no prompt). Used only by the video screen's right-edge swipe to change media volume. -->
++    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
++
+     <application
+         android:name=".VortexApp"
+         android:allowBackup="true"
+diff --git a/app/src/main/java/com/vortexx/player/data/settings/AppSettings.kt b/app/src/main/java/com/vortexx/player/data/settings/AppSettings.kt
+index 1d397c2..772f9ef 100644
+--- a/app/src/main/java/com/vortexx/player/data/settings/AppSettings.kt
++++ b/app/src/main/java/com/vortexx/player/data/settings/AppSettings.kt
+@@ -13,11 +13,17 @@ enum class SettingsMode(val label: String, val description: String) {
+     Developer("Developer", "Read-only codec reports, logging and diagnostics"),
+ }
+ 
+-/** Video scaling. Fit = letterbox, Stretch = fill ignoring aspect, Crop = zoom to fill. */
+-enum class VideoScaling(val label: String) {
+-    Fit("Fit"),
+-    Stretch("Stretch"),
+-    Crop("Crop"),
++/**
++ * Video picture size. The enum names are stored in settings, so they keep their old names;
++ * the labels are what people see. Original letterboxes, Fill stretches to the screen and
++ * Zoom crops to fill. 16:9 and 2.35:1 force a frame of that shape and crop the picture to it.
++ */
++enum class VideoScaling(val label: String, val forcedAspect: Float? = null) {
++    Fit("Original"),
++    Stretch("Fill"),
++    Crop("Zoom"),
++    Wide169("16:9", 16f / 9f),
++    Cinema235("2.35:1", 2.35f),
+ }
+ 
+ data class AppSettings(
+diff --git a/app/src/main/java/com/vortexx/player/feature/video/VideoPlayerScreen.kt b/app/src/main/java/com/vortexx/player/feature/video/VideoPlayerScreen.kt
+index 9765088..029cf9e 100644
+--- a/app/src/main/java/com/vortexx/player/feature/video/VideoPlayerScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/video/VideoPlayerScreen.kt
+@@ -1,18 +1,26 @@
+ package com.vortexx.player.feature.video
+ 
++import android.content.Context
+ import android.content.pm.ActivityInfo
++import android.media.AudioManager
++import android.provider.Settings
+ import android.view.View
++import android.view.Window
++import android.view.WindowManager
+ import androidx.compose.animation.AnimatedVisibility
+ import androidx.compose.animation.fadeIn
+ import androidx.compose.animation.fadeOut
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.gestures.detectVerticalDragGestures
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.Spacer
+ import androidx.compose.foundation.layout.WindowInsets
++import androidx.compose.foundation.layout.aspectRatio
+ import androidx.compose.foundation.layout.displayCutout
++import androidx.compose.foundation.layout.fillMaxHeight
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+@@ -44,6 +52,8 @@ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+ import androidx.compose.ui.graphics.Brush
+ import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.layout.onSizeChanged
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.platform.LocalView
+ import androidx.compose.ui.text.style.TextOverflow
+@@ -67,11 +77,13 @@ import com.vortexx.player.ui.designsystem.components.SecondaryButton
+ import com.vortexx.player.ui.designsystem.theme.VortexColors
+ import com.vortexx.player.ui.designsystem.theme.VortexSpacing
+ import kotlinx.coroutines.delay
++import kotlin.math.roundToInt
+ 
+ /**
+  * Full-screen video. Media3's PlayerView supplies the transport controls plus its
+  * settings menu (playback speed, audio track and subtitle track selection);
+- * VORTEX X adds scaling, rotation lock, resume and error explanations on top.
++ * VORTEX X adds picture sizes, edge swipes for brightness and volume, rotation lock,
++ * resume and error explanations on top.
+  */
+ @androidx.annotation.OptIn(UnstableApi::class)
+ @Composable
+@@ -80,10 +92,23 @@ fun VideoPlayerScreen(
+     viewModel: VideoPlayerViewModel = hiltViewModel(),
+ ) {
+     val ui by viewModel.ui.collectAsStateWithLifecycle()
+-    val activity = LocalContext.current.findActivity()
++    val context = LocalContext.current
++    val activity = context.findActivity()
+     val hostView = LocalView.current
+     var controlsVisible by remember { mutableStateOf(true) }
+ 
++    val audio = remember(context) { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
++    val maxVolume = remember(audio) { audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) }
++    val brightnessCarry = remember { Carry() }
++    val volumeCarry = remember { Carry() }
++    var hud by remember { mutableStateOf<GestureHud?>(null) }
++    LaunchedEffect(hud) {
++        if (hud != null) {
++            delay(900L)
++            hud = null
++        }
++    }
++
+     // Immersive mode while the player is on screen.
+     DisposableEffect(activity) {
+         val window = activity?.window
+@@ -92,6 +117,10 @@ fun VideoPlayerScreen(
+         insetsController?.hide(WindowInsetsCompat.Type.systemBars())
+         onDispose {
+             insetsController?.show(WindowInsetsCompat.Type.systemBars())
++            // Give the screen back its normal brightness when leaving the player.
++            window?.let { w ->
++                w.attributes = w.attributes.apply { screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE }
++            }
+             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+         }
+     }
+@@ -114,36 +143,76 @@ fun VideoPlayerScreen(
+         }
+     }
+ 
++    // Brightness: left edge. Volume: right edge. Each change shows a short readout.
++    val onBrightnessStart: () -> Unit = {
++        activity?.window?.let { brightnessCarry.value = it.currentBrightness(context) }
++    }
++    val onBrightnessDelta: (Float) -> Unit = { delta ->
++        activity?.window?.let { window ->
++            val next = (brightnessCarry.value + delta).coerceIn(0.01f, 1f)
++            brightnessCarry.value = next
++            window.attributes = window.attributes.apply { screenBrightness = next }
++            hud = GestureHud("Brightness ${(next * 100).roundToInt()}%")
++        }
++    }
++    val onVolumeStart: () -> Unit = {
++        volumeCarry.value = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / maxVolume
++    }
++    val onVolumeDelta: (Float) -> Unit = { delta ->
++        val next = (volumeCarry.value + delta).coerceIn(0f, 1f)
++        volumeCarry.value = next
++        runCatching { audio.setStreamVolume(AudioManager.STREAM_MUSIC, (next * maxVolume).roundToInt(), 0) }
++        hud = GestureHud("Volume ${(next * 100).roundToInt()}%")
++    }
++
+     Box(
+         Modifier
+             .fillMaxSize()
+             .background(Color.Black),
++        contentAlignment = Alignment.Center,
+     ) {
+-        AndroidView(
+-            factory = { ctx ->
+-                PlayerView(ctx).apply {
+-                    useController = true
+-                    controllerAutoShow = true
+-                    controllerShowTimeoutMs = 3_500
+-                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+-                    setShowSubtitleButton(true)
+-                    setShowNextButton(false)
+-                    setShowPreviousButton(false)
+-                    setBackgroundColor(android.graphics.Color.BLACK)
+-                    setControllerVisibilityListener(
+-                        PlayerView.ControllerVisibilityListener { visibility ->
+-                            controlsVisible = visibility == View.VISIBLE
+-                        },
+-                    )
+-                }
+-            },
+-            update = { view ->
+-                if (view.player !== viewModel.player) view.player = viewModel.player
+-                view.resizeMode = ui.scaling.toResizeMode()
+-                view.keepScreenOn = ui.keepScreenOn && ui.isPlaying
+-            },
+-            onRelease = { view -> view.player = null },
+-            modifier = Modifier.fillMaxSize(),
++        // A forced shape (16:9, 2.35:1) makes a centred frame of that shape; the picture is cropped to fill it.
++        val frameAspect = ui.scaling.forcedAspect
++        Box(if (frameAspect != null) Modifier.aspectRatio(frameAspect) else Modifier.fillMaxSize()) {
++            AndroidView(
++                factory = { ctx ->
++                    PlayerView(ctx).apply {
++                        useController = true
++                        controllerAutoShow = true
++                        controllerShowTimeoutMs = 3_500
++                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
++                        setShowSubtitleButton(true)
++                        setShowNextButton(false)
++                        setShowPreviousButton(false)
++                        setBackgroundColor(android.graphics.Color.BLACK)
++                        setControllerVisibilityListener(
++                            PlayerView.ControllerVisibilityListener { visibility ->
++                                controlsVisible = visibility == View.VISIBLE
++                            },
++                        )
++                    }
++                },
++                update = { view ->
++                    if (view.player !== viewModel.player) view.player = viewModel.player
++                    view.resizeMode = ui.scaling.toResizeMode()
++                    view.keepScreenOn = ui.keepScreenOn && ui.isPlaying
++                },
++                onRelease = { view -> view.player = null },
++                modifier = Modifier.fillMaxSize(),
++            )
++        }
++
++        // The strips sit beside the controls (between the top and bottom bars), so the
++        // controls and the seek bar still get their taps.
++        SideGestureZone(
++            modifier = Modifier.align(Alignment.CenterStart).fillMaxWidth(0.35f).fillMaxHeight(0.7f),
++            onStart = onBrightnessStart,
++            onDelta = onBrightnessDelta,
++        )
++        SideGestureZone(
++            modifier = Modifier.align(Alignment.CenterEnd).fillMaxWidth(0.35f).fillMaxHeight(0.7f),
++            onStart = onVolumeStart,
++            onDelta = onVolumeDelta,
+         )
+ 
+         AnimatedVisibility(
+@@ -163,6 +232,20 @@ fun VideoPlayerScreen(
+             )
+         }
+ 
++        hud?.let { readout ->
++            Text(
++                readout.text,
++                style = MaterialTheme.typography.titleMedium,
++                color = Color.White,
++                modifier = Modifier
++                    .align(Alignment.TopCenter)
++                    .padding(top = 88.dp)
++                    .clip(RoundedCornerShape(50))
++                    .background(Color.Black.copy(alpha = 0.75f))
++                    .padding(horizontal = VortexSpacing.lg, vertical = VortexSpacing.sm),
++            )
++        }
++
+         val resumedAt = ui.resumedFromMs
+         if (resumedAt != null && ui.error == null) {
+             Row(
+@@ -205,6 +288,49 @@ fun VideoPlayerScreen(
+     }
+ }
+ 
++/** A short on-screen readout for a gesture, such as "Volume 40%". */
++private data class GestureHud(val text: String, val stamp: Long = System.nanoTime())
++
++/** Keeps a value across the events of one drag (a local Float cannot change inside a lambda). */
++private class Carry(var value: Float = 0f)
++
++/**
++ * A strip along one screen edge. A vertical drag inside it calls [onDelta] with the drag as a
++ * fraction of the strip height (up is positive). [onStart] runs once when the drag begins.
++ */
++@Composable
++private fun SideGestureZone(
++    modifier: Modifier,
++    onStart: () -> Unit,
++    onDelta: (Float) -> Unit,
++) {
++    var heightPx by remember { mutableStateOf(1f) }
++    Box(
++        modifier
++            .onSizeChanged { heightPx = it.height.coerceAtLeast(1).toFloat() }
++            .pointerInput(Unit) {
++                detectVerticalDragGestures(
++                    onDragStart = { onStart() },
++                    onVerticalDrag = { change, dragAmount ->
++                        change.consume()
++                        onDelta(-dragAmount / heightPx)
++                    },
++                )
++            },
++    )
++}
++
++private fun Window.currentBrightness(context: Context): Float =
++    attributes.screenBrightness.takeIf { it >= 0f } ?: systemBrightness(context)
++
++/** The user's own brightness setting (0..255), used when this window has no override yet. */
++private fun systemBrightness(context: Context): Float =
++    try {
++        Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS) / 255f
++    } catch (e: Exception) {
++        0.5f
++    }
++
+ @Composable
+ private fun TopOverlay(
+     title: String,
+@@ -264,5 +390,5 @@ private fun trackSummary(audio: Int, subtitles: Int): String? {
+ private fun VideoScaling.toResizeMode(): Int = when (this) {
+     VideoScaling.Fit -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+     VideoScaling.Stretch -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+-    VideoScaling.Crop -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
++    VideoScaling.Crop, VideoScaling.Wide169, VideoScaling.Cinema235 -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+ }
+diff --git a/app/src/test/java/com/vortexx/player/VideoScalingTest.kt b/app/src/test/java/com/vortexx/player/VideoScalingTest.kt
+new file mode 100644
+index 0000000..4220f8d
+--- /dev/null
++++ b/app/src/test/java/com/vortexx/player/VideoScalingTest.kt
+@@ -0,0 +1,32 @@
++package com.vortexx.player
++
++import com.vortexx.player.data.settings.VideoScaling
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import kotlin.math.abs
++
++class VideoScalingTest {
++
++    @Test
++    fun fiveSizesInTheOrderPeopleSee() {
++        assertEquals(listOf("Original", "Fill", "Zoom", "16:9", "2.35:1"), VideoScaling.entries.map { it.label })
++    }
++
++    @Test
++    fun onlyTheTwoCinemaShapesForceAnAspect() {
++        assertNull(VideoScaling.Fit.forcedAspect)
++        assertNull(VideoScaling.Stretch.forcedAspect)
++        assertNull(VideoScaling.Crop.forcedAspect)
++        assertTrue(abs(VideoScaling.Wide169.forcedAspect!! - 16f / 9f) < 0.0001f)
++        assertTrue(abs(VideoScaling.Cinema235.forcedAspect!! - 2.35f) < 0.0001f)
++    }
++
++    @Test
++    fun storedNamesStillResolve() {
++        // Settings are saved by enum name; the old names must keep working after the relabel.
++        assertEquals(VideoScaling.Crop, VideoScaling.valueOf("Crop"))
++        assertEquals(VideoScaling.Fit, VideoScaling.valueOf("Fit"))
++    }
++}
