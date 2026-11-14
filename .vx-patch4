@@ -1,0 +1,24 @@
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -5,12 +5,8 @@
+     <!-- Scoped media access. No MANAGE_EXTERNAL_STORAGE: MediaStore + Storage Access Framework only. -->
+     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+-    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+-    <uses-permission
+-        android:name="android.permission.READ_EXTERNAL_STORAGE"
+-        android:maxSdkVersion="32" />
+ 
+     <!-- Background playback. Media-session notifications are exempt from POST_NOTIFICATIONS. -->
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+     <uses-permission android:name="android.permission.WAKE_LOCK" />
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -17,5 +17,5 @@
+     defaultConfig {
+         applicationId = "com.vortexx.player"
+-        minSdk = 26
++        minSdk = 33
+         targetSdk = 36
+         versionCode = 8
