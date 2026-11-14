@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs before Gradle. In an overlay branch it first applies the branch patches (.vx-patch, .vx-patch2, ... in order) and
-# checks the pushed files against the .vx-sha256 lists; then it downloads the AI models and the brand font.
-# A branch with a .vx-nomodels file is built without the AI models.
+# Runs before Gradle. In an overlay branch it first applies the branch patches (.vx-patch, .vx-patch2, ... in order),
+# then removes the paths listed in .vx-delete, then checks the pushed files against the .vx-sha256 lists.
+# This build has no AI code and no AI models. Then it downloads the brand font.
 # Montserrat: SIL Open Font License 1.1 (google/fonts, ofl/montserrat). The exit status is the
 # font's: without the font the app uses the platform font.
 #
@@ -21,6 +21,21 @@ for PATCH in .vx-patch*; do
     echo "### Overlay patch FAILED ($PATCH): the build below does not contain the patched changes" >> "$NOTE"
   fi
 done
+
+# .vx-delete: one path per line. Only app/src/... paths and the AI model download script may be removed.
+if [ -f .vx-delete ]; then
+  while IFS= read -r P || [ -n "$P" ]; do
+    P="${P//$'\r'/}"
+    case "$P" in
+      ""|\#*) continue ;;
+      *..*) echo "::error::.vx-delete entry refused: $P" ;;
+      app/src/*|.github/scripts/ci-models.sh)
+        if [ -e "$P" ]; then rm -rf -- "$P" && echo "Removed $P." >> "$NOTE"; fi ;;
+      *) echo "::error::.vx-delete entry refused: $P" ;;
+    esac
+  done < .vx-delete
+fi
+
 if [ -f .vx-sha256 ]; then
   # Later lists (.vx-sha256-3, ...) replace earlier entries for the same file.
   cat .vx-sha256* | awk 'NF == 2 { hash[$2] = $1 } END { for (path in hash) print hash[path] "  " path }' > "$DIR/.vx-sha.list"
@@ -36,15 +51,7 @@ if [ -f .vx-sha256 ]; then
   fi
 fi
 
-if [ -f .vx-nomodels ]; then
-  echo "AI models: not in this build (.vx-nomodels)." >> "$NOTE"
-elif [ -f .github/scripts/ci-models.sh ]; then
-  if bash .github/scripts/ci-models.sh "$DIR"; then
-    echo "AI models downloaded." >> "$NOTE"
-  else
-    echo "### AI models: download FAILED, this app is built without AI" >> "$NOTE"
-  fi
-fi
+echo "AI: none in this build (AI code, AI tests and models removed)." >> "$NOTE"
 
 OUT="$DIR/app/src/main/assets/fonts"
 BASE="https://github.com/google/fonts/raw/main/ofl/montserrat"

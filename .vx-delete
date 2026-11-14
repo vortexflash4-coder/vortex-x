@@ -1,0 +1,5 @@
+# AI removed (owner decision, Stage 1): no AI code, AI tests, AI models or model download.
+app/src/main/java/com/vortexx/player/ai
+app/src/test/java/com/vortexx/player/AiPipelineTest.kt
+app/src/test/java/com/vortexx/player/AiModelsTest.kt
+.github/scripts/ci-models.sh
