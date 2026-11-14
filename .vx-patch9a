@@ -1,0 +1,215 @@
+diff --git a/app/src/main/java/com/vortexx/player/feature/home/HomeScreen.kt b/app/src/main/java/com/vortexx/player/feature/home/HomeScreen.kt
+index 1eb1277..736498d 100644
+--- a/app/src/main/java/com/vortexx/player/feature/home/HomeScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/home/HomeScreen.kt
+@@ -29,7 +29,10 @@ import androidx.compose.foundation.lazy.items
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.rounded.Equalizer
++import androidx.compose.material.icons.rounded.ChevronRight
++import androidx.compose.material.icons.rounded.Folder
+ import androidx.compose.material.icons.rounded.LibraryMusic
++import androidx.compose.material.icons.rounded.Person
+ import androidx.compose.material.icons.rounded.PlayArrow
+ import androidx.compose.material.icons.rounded.Refresh
+ import androidx.compose.material.icons.rounded.Settings
+@@ -41,6 +44,9 @@ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
+ import androidx.compose.runtime.remember
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+@@ -83,6 +89,7 @@ import com.vortexx.player.ui.designsystem.components.BrandHeader
+ import com.vortexx.player.ui.designsystem.components.HeaderIconButton
+ import com.vortexx.player.ui.designsystem.components.InlineNotice
+ import com.vortexx.player.ui.designsystem.components.MetaChip
++import com.vortexx.player.ui.designsystem.components.PillChip
+ import com.vortexx.player.ui.designsystem.components.PlayCircleButton
+ import com.vortexx.player.ui.designsystem.components.PrimaryButton
+ import com.vortexx.player.ui.designsystem.components.ProgressLine
+@@ -99,6 +106,7 @@ import com.vortexx.player.ui.navigation.MusicRoute
+ import com.vortexx.player.ui.navigation.SettingsRoute
+ import com.vortexx.player.ui.navigation.StudioRoute
+ import com.vortexx.player.ui.navigation.VideosRoute
++import com.vortexx.player.ui.navigation.YouRoute
+ import dagger.hilt.android.lifecycle.HiltViewModel
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.flow.Flow
+@@ -107,9 +115,15 @@ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.combine
+ import kotlinx.coroutines.flow.flowOn
+ import kotlinx.coroutines.flow.stateIn
+-import java.time.LocalTime
+ import javax.inject.Inject
+ 
++/** Home filter chips. Music shows music shelves, Video shows video shelves, For you shows both. */
++enum class HomeFilter(val label: String) {
++    ForYou("For you"),
++    Music("Music"),
++    Video("Video"),
++}
++
+ data class HomeUiState(
+     val loading: Boolean = true,
+     val songCount: Int = 0,
+@@ -194,7 +208,9 @@ fun HomeScreen(
+     val position by viewModel.position.collectAsStateWithLifecycle(initialValue = PositionSnapshot())
+     val status by viewModel.status.collectAsStateWithLifecycle()
+     val path by viewModel.path.collectAsStateWithLifecycle()
+-    val greeting = remember { greetingFor(LocalTime.now().hour) }
++    var filter by rememberSaveable { mutableStateOf(HomeFilter.ForYou) }
++    val showMusic = filter != HomeFilter.Video
++    val showVideo = filter != HomeFilter.Music
+     val revealState = rememberRevealState()
+ 
+     BoxWithConstraints(Modifier.fillMaxSize()) {
+@@ -207,15 +223,29 @@ fun HomeScreen(
+                 Box {
+                     AmbientGlow(Modifier.matchParentSize())
+                     BrandHeader(
+-                        title = greeting,
++                        title = "Your next obsession.",
+                         subtitle = librarySubtitle(state),
+                         modifier = Modifier.reveal(revealState, "header"),
+                     ) {
++                        HeaderIconButton(Icons.Rounded.Person, "You", onClick = { onNavigate(YouRoute) })
+                         HeaderIconButton(Icons.Rounded.Settings, "Settings", onClick = { onNavigate(SettingsRoute) })
+                     }
+                 }
+             }
+ 
++            item(key = "filters") {
++                Row(
++                    Modifier
++                        .reveal(revealState, "filters", order = 1)
++                        .padding(horizontal = ScreenMargin, vertical = VortexSpacing.sm),
++                    horizontalArrangement = Arrangement.spacedBy(VortexSpacing.sm),
++                ) {
++                    HomeFilter.entries.forEach { option ->
++                        PillChip(option.label, selected = filter == option, onClick = { filter = option })
++                    }
++                }
++            }
++
+             val error = state.libraryError
+             if (error != null) {
+                 item(key = "error") {
+@@ -228,7 +258,7 @@ fun HomeScreen(
+ 
+             val nowPlaying = playback.nowPlaying
+             val featured = state.newestAlbums.firstOrNull()
+-            if (nowPlaying != null) {
++            if (nowPlaying != null && showMusic) {
+                 item(key = "deck") {
+                     NowPlayingDeck(
+                         nowPlaying = nowPlaying,
+@@ -247,7 +277,7 @@ fun HomeScreen(
+                             .padding(horizontal = ScreenMargin, vertical = VortexSpacing.sm),
+                     )
+                 }
+-            } else if (featured != null) {
++            } else if (featured != null && showMusic) {
+                 item(key = "featured") {
+                     FeaturedAlbum(
+                         album = featured,
+@@ -274,7 +304,7 @@ fun HomeScreen(
+                 }
+             }
+ 
+-            if (state.songCount > 0) {
++            if (state.songCount > 0 && showMusic) {
+                 item(key = "quick") {
+                     Row(
+                         Modifier
+@@ -301,7 +331,7 @@ fun HomeScreen(
+                 }
+             }
+ 
+-            if (state.continueWatching.isNotEmpty()) {
++            if (state.continueWatching.isNotEmpty() && showVideo) {
+                 item(key = "cw-title") {
+                     SectionTitle("Continue watching", actionLabel = "All videos", onAction = { onNavigate(VideosRoute) })
+                 }
+@@ -318,7 +348,7 @@ fun HomeScreen(
+                 }
+             }
+ 
+-            if (state.recentlyAdded.isNotEmpty()) {
++            if (state.recentlyAdded.isNotEmpty() && showMusic) {
+                 item(key = "recent-title") {
+                     SectionTitle("Recently added", actionLabel = "See all", onAction = { onNavigate(MusicRoute) })
+                 }
+@@ -345,7 +375,7 @@ fun HomeScreen(
+                 }
+             }
+ 
+-            if (state.newestAlbums.size > 1) {
++            if (state.newestAlbums.size > 1 && showMusic) {
+                 item(key = "albums-title") {
+                     SectionTitle("Albums on this phone", actionLabel = "See all", onAction = { onNavigate(MusicRoute) })
+                 }
+@@ -370,6 +400,20 @@ fun HomeScreen(
+                     }
+                 }
+             }
++
++            item(key = "library-title") {
++                SectionTitle("Your library")
++            }
++            item(key = "library") {
++                LibraryCard(
++                    songs = state.songCount,
++                    videos = state.videoCount,
++                    onOpen = { onNavigate(MusicRoute) },
++                    modifier = Modifier
++                        .reveal(revealState, "library", order = 6)
++                        .padding(horizontal = ScreenMargin, vertical = VortexSpacing.sm),
++                )
++            }
+         }
+     }
+ }
+@@ -494,6 +538,38 @@ private fun EmptyLibraryCard(onRescan: () -> Unit, modifier: Modifier = Modifier
+     }
+ }
+ 
++/** The phone's own library, summarised. Opens the music library; counts come from the media scan. */
++@Composable
++private fun LibraryCard(songs: Int, videos: Int, onOpen: () -> Unit, modifier: Modifier = Modifier) {
++    val shape = RoundedCornerShape(20.dp)
++    Row(
++        modifier
++            .fillMaxWidth()
++            .clip(shape)
++            .background(VortexColors.Card)
++            .border(1.dp, VortexColors.Divider, shape)
++            .clickable(role = Role.Button, onClickLabel = "Open library", onClick = onOpen)
++            .padding(VortexSpacing.lg),
++        verticalAlignment = Alignment.CenterVertically,
++    ) {
++        Icon(Icons.Rounded.Folder, contentDescription = null, tint = VortexColors.TextSecondary, modifier = Modifier.size(28.dp))
++        Spacer(Modifier.width(VortexSpacing.md))
++        Column(Modifier.weight(1f)) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                Text("On this device", style = MaterialTheme.typography.titleMedium)
++                Spacer(Modifier.width(VortexSpacing.sm))
++                MetaChip("LOCAL")
++            }
++            Text(
++                "${LibraryLogic.pluralize(songs, "song")} · ${LibraryLogic.pluralize(videos, "video")}",
++                style = MaterialTheme.typography.bodyMedium,
++                color = VortexColors.TextSecondary,
++            )
++        }
++        Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = VortexColors.TextSecondary)
++    }
++}
++
+ /**
+  * Home control-centre deck: what is playing, how it reaches the ears (DSP
+  * state, stream format, output route) and the main controls. Every value
+  * the Home control-centre deck: what is playing, how it reaches the ears (DSP
