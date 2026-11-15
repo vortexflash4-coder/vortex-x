@@ -15,13 +15,13 @@ object SoundPresets {
 
     private fun preset(
         name: String,
-        preampDb: Float,
+        preampDb: Float = 0f,
         bands: List<Float>,
-        bassDb: Float,
-        punchDb: Float,
+        bassDb: Float = 0f,
+        punchDb: Float = 0f,
         compressor: Int,
-        limiter: Boolean,
-        widthPercent: Int,
+        limiter: Boolean = true,
+        widthPercent: Int = 100,
     ) = SoundPreset(
         name,
         DspParameters(
@@ -36,14 +36,41 @@ object SoundPresets {
         builtIn = true,
     )
 
-    /** Changes nothing: the file as it is. */
+    /** Bit-exact unity: no gain, filter, dynamics or width stage changes the samples. */
     val STUDIO_FLAT = SoundPreset("Studio Flat", DspParameters(), builtIn = true)
 
-    //                                                31  63  125 250 500 1k  2k  4k  8k  16k
-    val HARD_DJ_BASS = preset("Hard DJ Bass", -4f, listOf(3f, 2f, 0f, -2f, -1f, 0f, 1f, 2f, 3f, 2f), bassDb = 9f, punchDb = 6f, compressor = 60, limiter = true, widthPercent = 110)
-    val PUNCHY_CLUB = preset("Punchy Club", -2f, listOf(2f, 2f, 0f, -1f, -1f, 0f, 1f, 2f, 2f, 1f), bassDb = 5f, punchDb = 7f, compressor = 45, limiter = true, widthPercent = 120)
-    val VOCAL_BOOST = preset("Vocal Boost", -2f, listOf(-2f, -1f, -1f, 0f, 2f, 3f, 4f, 3f, 1f, 0f), bassDb = 0f, punchDb = 0f, compressor = 30, limiter = true, widthPercent = 100)
-    val CINEMA = preset("Cinema", -1f, listOf(2f, 1f, 0f, 0f, 0f, 1f, 2f, 2f, 1f, 1f), bassDb = 4f, punchDb = 2f, compressor = 35, limiter = true, widthPercent = 130)
+    // Band centres: 31, 63, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz.
+    // Bass shelf: 90 Hz. Kick band: 60 Hz.
+    val HARD_DJ_BASS = preset(
+        "Hard DJ Bass",
+        preampDb = -1.5f,
+        bands = listOf(2f, 1.5f, -2.5f, -2f, -1f, 0f, -1f, -1.5f, 1f, 1.5f),
+        bassDb = 5f,
+        punchDb = 4.5f,
+        compressor = 35,
+        widthPercent = 105,
+    )
+    val PUNCHY_CLUB = preset(
+        "Punchy Club",
+        bands = listOf(0f, 0f, -2f, -1.5f, 0f, 0f, 0f, -1f, 0f, 2f),
+        bassDb = 3.5f,
+        punchDb = 6f,
+        compressor = 45,
+        widthPercent = 115,
+    )
+    val VOCAL_BOOST = preset(
+        "Vocal Boost",
+        bands = listOf(0f, 0f, 0f, -2.5f, 0f, 0f, 2.5f, 3f, 0f, 0f),
+        compressor = 30,
+    )
+    val CINEMA = preset(
+        "Cinema",
+        bands = listOf(0f, 0f, 0f, -1.5f, 0f, 0f, 1.5f, 0f, 0f, 1f),
+        bassDb = 3f,
+        punchDb = 2f,
+        compressor = 25,
+        widthPercent = 130,
+    )
 
     val BUILT_IN: List<SoundPreset> = listOf(STUDIO_FLAT, HARD_DJ_BASS, PUNCHY_CLUB, VOCAL_BOOST, CINEMA)
 
@@ -53,7 +80,7 @@ object SoundPresets {
 
     /** A name as it is stored: one line, trimmed, at most [MAX_NAME_LENGTH] characters; empty = not usable. */
     fun cleanName(raw: String): String =
-        raw.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim().take(MAX_NAME_LENGTH).trim()
+        raw.replace('\\t', ' ').replace('\\n', ' ').replace('\\r', ' ').trim().take(MAX_NAME_LENGTH).trim()
 
     /** True when [name] can be saved: not empty and not the name of a built-in preset. */
     fun isUsableName(name: String): Boolean =
@@ -68,14 +95,14 @@ object SoundPresets {
 
     /** One preset per line: name, a tab, the encoded settings. */
     fun encodeUser(presets: List<SoundPreset>): String =
-        presets.joinToString("\n") { it.name + "\t" + it.parameters.encode() }
+        presets.joinToString("\\n") { it.name + "\\t" + it.parameters.encode() }
 
     /** Reads what [encodeUser] wrote; lines that are not valid are left out. */
     fun decodeUser(raw: String?): List<SoundPreset> {
         if (raw.isNullOrBlank()) return emptyList()
         val presets = ArrayList<SoundPreset>()
-        for (line in raw.split('\n')) {
-            val tab = line.indexOf('\t')
+        for (line in raw.split('\\n')) {
+            val tab = line.indexOf('\\t')
             if (tab <= 0) continue
             val name = cleanName(line.substring(0, tab))
             val parameters = DspParameters.decode(line.substring(tab + 1)) ?: continue
