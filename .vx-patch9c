@@ -1,0 +1,214 @@
+diff --git a/app/src/main/java/com/vortexx/player/feature/settings/SettingsScreen.kt b/app/src/main/java/com/vortexx/player/feature/settings/SettingsScreen.kt
+index 968f76b..23e83d7 100644
+--- a/app/src/main/java/com/vortexx/player/feature/settings/SettingsScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/settings/SettingsScreen.kt
+@@ -13,12 +13,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.heightIn
+ import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.lazy.LazyListScope
+ import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.layout.widthIn
+ import androidx.compose.foundation.lazy.LazyColumn
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
++import androidx.compose.material.icons.rounded.Build
++import androidx.compose.material.icons.rounded.Equalizer
++import androidx.compose.material.icons.rounded.Folder
++import androidx.compose.material.icons.rounded.LibraryMusic
+ import androidx.compose.material.icons.rounded.RestartAlt
++import androidx.compose.material.icons.rounded.Tune
++import androidx.compose.material.icons.rounded.VideoLibrary
+ import androidx.compose.material.icons.rounded.SearchOff
+ import androidx.compose.material3.AlertDialog
+ import androidx.compose.material3.HorizontalDivider
+@@ -31,11 +39,14 @@ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.vector.ImageVector
+ import androidx.compose.ui.semantics.Role
+ import androidx.compose.ui.unit.dp
++import androidx.activity.compose.BackHandler
+ import androidx.hilt.navigation.compose.hiltViewModel
+ import androidx.lifecycle.ViewModel
+ import androidx.lifecycle.compose.collectAsStateWithLifecycle
+@@ -48,6 +59,7 @@ import com.vortexx.player.data.settings.AppSettings
+ import com.vortexx.player.data.settings.SettingDefinition
+ import com.vortexx.player.data.settings.SettingId
+ import com.vortexx.player.data.settings.SettingsCatalog
++import com.vortexx.player.data.settings.SettingsCategory
+ import com.vortexx.player.data.settings.SettingsMode
+ import com.vortexx.player.data.settings.SettingsRepository
+ import com.vortexx.player.data.settings.VideoScaling
+@@ -60,6 +72,7 @@ import com.vortexx.player.ui.designsystem.components.SecondaryButton
+ import com.vortexx.player.ui.designsystem.components.SectionHeader
+ import com.vortexx.player.ui.designsystem.components.ToggleRow
+ import com.vortexx.player.ui.designsystem.components.VortexCard
++import com.vortexx.player.ui.designsystem.components.VortexMark
+ import com.vortexx.player.ui.designsystem.components.VortexTopBar
+ import com.vortexx.player.ui.designsystem.theme.VortexColors
+ import com.vortexx.player.ui.designsystem.theme.VortexSpacing
+@@ -120,6 +133,7 @@ class SettingsViewModel @Inject constructor(
+ fun SettingsScreen(
+     onBack: () -> Unit,
+     onOpenDiagnostics: () -> Unit,
++    onOpenAudioLab: () -> Unit,
+     viewModel: SettingsViewModel = hiltViewModel(),
+ ) {
+     val settings by viewModel.settings.collectAsStateWithLifecycle()
+@@ -128,20 +142,30 @@ fun SettingsScreen(
+     val scope = rememberCoroutineScope()
+     var confirmReset by remember { mutableStateOf(false) }
+     var confirmClearHistory by remember { mutableStateOf(false) }
++    // The hub lists areas; an area opens the settings of one category.
++    var section by rememberSaveable { mutableStateOf<String?>(null) }
++    val sectionCategory = SettingsCategory.entries.firstOrNull { it.name == section }
++    BackHandler(enabled = sectionCategory != null) { section = null }
+ 
+     Column(Modifier.fillMaxSize()) {
+         val current = settings
+         VortexTopBar(
+-            title = "Settings",
++            title = sectionCategory?.title ?: "Settings",
+             subtitle = current?.mode?.let { "Detail level: ${it.label}" },
+-            onBack = onBack,
++            onBack = { if (sectionCategory != null) section = null else onBack() },
+         )
+         if (current == null) {
+             LoadingState("Loading settings…")
+             return@Column
+         }
+ 
+-        val visible = SettingsCatalog.visible(current.mode, query)
++        val inHub = sectionCategory == null && query.isBlank()
++        val visible = if (inHub) {
++            emptyList()
++        } else {
++            SettingsCatalog.visible(current.mode, query)
++                .filter { query.isNotBlank() || sectionCategory == null || it.category == sectionCategory }
++        }
+         val grouped = visible.groupBy { it.category }
+         // The search field is the list's first item, so content scrolls with it
+         // instead of sliding underneath a fixed field.
+@@ -150,11 +174,12 @@ fun SettingsScreen(
+                 SearchField(
+                     value = query,
+                     onValueChange = viewModel::setQuery,
+-                    placeholder = "Search settings",
++                    placeholder = "Find a setting",
+                     modifier = Modifier.padding(start = VortexSpacing.lg, end = VortexSpacing.lg, bottom = VortexSpacing.sm),
+                 )
+             }
+-            if (visible.isEmpty()) {
++            if (inHub) hubItems(current.mode, onOpenAudioLab) { section = it.name }
++            if (!inHub && visible.isEmpty()) {
+                 item(key = "empty") {
+                     EmptyState(
+                         icon = Icons.Rounded.SearchOff,
+@@ -343,3 +368,88 @@ private fun ActionRow(definition: SettingDefinition, onClick: () -> Unit) {
+         Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = VortexColors.TextSecondary)
+     }
+ }
++
++private class HubEntry(val icon: ImageVector, val title: String, val summary: String, val category: SettingsCategory?)
++
++/** The Settings hub: one row per area that has working settings. Audio Lab has its own screen. */
++private fun LazyListScope.hubItems(
++    mode: SettingsMode,
++    onOpenAudioLab: () -> Unit,
++    onOpenCategory: (SettingsCategory) -> Unit,
++) {
++    val shown = SettingsCatalog.visible(mode, "").map { it.category }.toSet()
++    val groups = listOf(
++        "Playback" to listOf(
++            HubEntry(Icons.Rounded.Equalizer, "Audio Lab", "Equalizer, bass, dynamics and output", null),
++            HubEntry(Icons.Rounded.LibraryMusic, "Music playback", "Headphones and silence", SettingsCategory.Music),
++            HubEntry(Icons.Rounded.VideoLibrary, "Video playback", "Resume, screen and picture size", SettingsCategory.Video),
++        ),
++        "Library" to listOf(
++            HubEntry(Icons.Rounded.Folder, "Library and storage", "Short clips and media scan", SettingsCategory.Library),
++        ),
++        "App" to listOf(
++            HubEntry(Icons.Rounded.Tune, "General and interface", "Detail level", SettingsCategory.General),
++            HubEntry(Icons.Rounded.Build, "Developer diagnostics", "Decoder reports and logging", SettingsCategory.Developer),
++        ),
++    )
++    item(key = "hub-profile") {
++        VortexCard(
++            modifier = Modifier
++                .padding(horizontal = VortexSpacing.lg, vertical = VortexSpacing.sm)
++                .widthIn(max = 840.dp)
++                .fillMaxWidth(),
++            contentPadding = PaddingValues(VortexSpacing.lg),
++        ) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                VortexMark(size = 40.dp)
++                Spacer(Modifier.width(VortexSpacing.md))
++                Column {
++                    Text("Your VORTEX X", style = MaterialTheme.typography.titleMedium)
++                    Text("Personal media, your way", style = MaterialTheme.typography.bodyMedium, color = VortexColors.TextSecondary)
++                }
++            }
++        }
++    }
++    groups.forEach { (title, entries) ->
++        val rows = entries.filter { it.category == null || it.category in shown }
++        if (rows.isNotEmpty()) {
++            item(key = "hub-header-$title") { SectionHeader(title) }
++            item(key = "hub-card-$title") {
++                VortexCard(
++                    modifier = Modifier
++                        .padding(horizontal = VortexSpacing.lg)
++                        .widthIn(max = 840.dp)
++                        .fillMaxWidth(),
++                    contentPadding = PaddingValues(vertical = VortexSpacing.xs),
++                ) {
++                    rows.forEachIndexed { index, entry ->
++                        if (index > 0) HorizontalDivider(color = VortexColors.Divider.copy(alpha = 0.6f))
++                        val category = entry.category
++                        HubRow(entry.icon, entry.title, entry.summary) {
++                            if (category == null) onOpenAudioLab() else onOpenCategory(category)
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++@Composable
++private fun HubRow(icon: ImageVector, title: String, summary: String, onClick: () -> Unit) {
++    Row(
++        Modifier
++            .fillMaxWidth()
++            .clickable(role = Role.Button, onClick = onClick)
++            .padding(horizontal = VortexSpacing.lg, vertical = VortexSpacing.md),
++        verticalAlignment = Alignment.CenterVertically,
++    ) {
++        Icon(icon, contentDescription = null, tint = VortexColors.TextSecondary, modifier = Modifier.size(24.dp))
++        Spacer(Modifier.width(VortexSpacing.md))
++        Column(Modifier.weight(1f)) {
++            Text(title, style = MaterialTheme.typography.titleSmall)
++            Text(summary, style = MaterialTheme.typography.bodySmall, color = VortexColors.TextSecondary)
++        }
++        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = VortexColors.TextSecondary)
++    }
++}
+diff --git a/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt b/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
+index 3aa0f13..93845bf 100644
+--- a/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
++++ b/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
+@@ -154,6 +154,7 @@ fun VortexNavHost(
+                 SettingsScreen(
+                     onBack = back,
+                     onOpenDiagnostics = { navController.navigate(DiagnosticsRoute) { launchSingleTop = true } },
++                    onOpenAudioLab = { navController.navigate(StudioRoute) { launchSingleTop = true } },
+                 )
+             }
+         }
