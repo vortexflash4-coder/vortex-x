@@ -1,2 +1,3 @@
 57f697b8a7a86b3534dd641143456ebcb75c896683a0bdae5b43fda6579d84e6  app/src/main/java/com/vortexx/player/audio/dsp/SoundPresets.kt
 db5bb9ba0d69e3a0955de5da6a406d230285c59a11fa826286f177c86eefaf90  app/src/test/java/com/vortexx/player/DynamicsTest.kt
+# Exact preset calibration assertions are covered by DynamicsTest.presetsAndTheirStorage.
