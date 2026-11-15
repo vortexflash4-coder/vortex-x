@@ -1,0 +1,354 @@
+diff --git a/app/src/main/java/com/vortexx/player/feature/nowplaying/NowPlayingScreen.kt b/app/src/main/java/com/vortexx/player/feature/nowplaying/NowPlayingScreen.kt
+index 223bfd0..05317cb 100644
+--- a/app/src/main/java/com/vortexx/player/feature/nowplaying/NowPlayingScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/nowplaying/NowPlayingScreen.kt
+@@ -39,6 +39,8 @@ import androidx.compose.material.icons.rounded.Equalizer
+ import androidx.compose.material.icons.rounded.Favorite
+ import androidx.compose.material.icons.rounded.FavoriteBorder
+ import androidx.compose.material.icons.rounded.KeyboardArrowDown
++import androidx.compose.material.icons.rounded.KeyboardArrowLeft
++import androidx.compose.material.icons.rounded.MoreVert
+ import androidx.compose.material.icons.rounded.MusicNote
+ import androidx.compose.material.icons.rounded.Pause
+ import androidx.compose.material.icons.rounded.PlayArrow
+@@ -48,6 +50,8 @@ import androidx.compose.material.icons.rounded.Shuffle
+ import androidx.compose.material.icons.rounded.SkipNext
+ import androidx.compose.material.icons.rounded.SkipPrevious
+ import androidx.compose.material.icons.rounded.Speed
++import androidx.compose.material3.DropdownMenu
++import androidx.compose.material3.DropdownMenuItem
+ import androidx.compose.material3.FilledIconButton
+ import androidx.compose.material3.Icon
+ import androidx.compose.material3.IconButton
+@@ -57,6 +61,7 @@ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableFloatStateOf
++import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+@@ -86,7 +91,7 @@ import com.vortexx.player.audio.engine.AudioEngine
+ import com.vortexx.player.audio.engine.AudioFormatLabels
+ import com.vortexx.player.audio.engine.AudioPathState
+ import com.vortexx.player.audio.engine.DspStatus
+-import com.vortexx.player.audio.engine.DspStatusKind
++import com.vortexx.player.audio.engine.OutputModePreference
+ import com.vortexx.player.audio.engine.PlaybackEngine
+ import com.vortexx.player.audio.engine.RouteInfo
+ import com.vortexx.player.core.util.Format
+@@ -101,8 +106,8 @@ import com.vortexx.player.playback.SleepTimer
+ import com.vortexx.player.ui.designsystem.components.EmptyState
+ import com.vortexx.player.ui.designsystem.components.InlineNotice
+ import com.vortexx.player.ui.designsystem.components.NoticeTone
++import com.vortexx.player.ui.designsystem.components.VortexWordmark
+ import com.vortexx.player.ui.designsystem.instrument.InstrumentText
+-import com.vortexx.player.ui.designsystem.instrument.rememberMeterDisplay
+ import com.vortexx.player.ui.designsystem.theme.VortexColors
+ import com.vortexx.player.ui.designsystem.theme.VortexSpacing
+ import dagger.hilt.android.lifecycle.HiltViewModel
+@@ -129,6 +134,7 @@ class NowPlayingViewModel @Inject constructor(
+     val status: StateFlow<DspStatus> = playbackEngine.status
+     val path: StateFlow<AudioPathState> = diagnostics.state
+     val meters: MeterBus = audioEngine.meters
++    val outputMode: StateFlow<OutputModePreference> = audioEngine.outputMode
+     val dsp: StateFlow<DspParameters> = audioEngine.state
+     val sleepTimerActive: StateFlow<Boolean> = combine(sleepTimer.deadlineElapsedMs, playback.state) { deadline, _ -> deadline != null }
+         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
+@@ -186,6 +192,7 @@ fun NowPlayingScreen(
+     val sleepActive by viewModel.sleepTimerActive.collectAsStateWithLifecycle()
+     val status by viewModel.status.collectAsStateWithLifecycle()
+     val path by viewModel.path.collectAsStateWithLifecycle()
++    val outputMode by viewModel.outputMode.collectAsStateWithLifecycle()
+ 
+     Box(
+         Modifier
+@@ -239,6 +246,7 @@ fun NowPlayingScreen(
+                     position = position,
+                     status = status,
+                     path = path,
++                    outputMode = outputMode,
+                     isFavorite = isFavorite,
+                     sleepActive = sleepActive,
+                     viewModel = viewModel,
+@@ -250,7 +258,10 @@ fun NowPlayingScreen(
+             }
+ 
+             Column(Modifier.fillMaxSize()) {
+-                TopBar(state = state, onBack = onBack, onOpenQueue = onOpenQueue)
++                Box(Modifier.fillMaxWidth().padding(top = VortexSpacing.sm), contentAlignment = Alignment.Center) {
++                    VortexWordmark()
++                }
++                TopBar(onBack = onBack, onOpenQueue = onOpenQueue, onOpenControlCenter = onOpenControlCenter, onOpenAudioLab = onOpenAudioLab)
+                 if (landscape) {
+                     Row(
+                         Modifier
+@@ -283,25 +294,47 @@ fun NowPlayingScreen(
+ }
+ 
+ @Composable
+-private fun TopBar(state: PlaybackUiState, onBack: () -> Unit, onOpenQueue: () -> Unit) {
++private fun TopBar(onBack: () -> Unit, onOpenQueue: () -> Unit, onOpenControlCenter: () -> Unit, onOpenAudioLab: () -> Unit) {
++    var menuOpen by remember { mutableStateOf(false) }
+     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+         IconButton(onClick = onBack) {
+-            Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "Close player")
++            Icon(Icons.Rounded.KeyboardArrowLeft, contentDescription = "Back")
+         }
+-        Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+-            Text("NOW PLAYING", style = InstrumentText.label)
+-            if (state.queue.isNotEmpty() && state.currentIndex >= 0) {
+-                Text(
+-                    "${state.currentIndex + 1} of ${state.queue.size} in queue",
+-                    style = InstrumentText.readoutSmall,
+-                    textAlign = TextAlign.Center,
+-                    maxLines = 1,
++        Text(
++            "PLAYING FROM YOUR LIBRARY",
++            style = InstrumentText.label,
++            maxLines = 1,
++            overflow = TextOverflow.Ellipsis,
++            modifier = Modifier.weight(1f),
++        )
++        Box {
++            IconButton(onClick = { menuOpen = true }) {
++                Icon(Icons.Rounded.MoreVert, contentDescription = "More options")
++            }
++            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
++                DropdownMenuItem(
++                    text = { Text("Queue") },
++                    onClick = {
++                        menuOpen = false
++                        onOpenQueue()
++                    },
++                )
++                DropdownMenuItem(
++                    text = { Text("Audio Lab") },
++                    onClick = {
++                        menuOpen = false
++                        onOpenAudioLab()
++                    },
++                )
++                DropdownMenuItem(
++                    text = { Text("Sleep timer and output") },
++                    onClick = {
++                        menuOpen = false
++                        onOpenControlCenter()
++                    },
+                 )
+             }
+         }
+-        IconButton(onClick = onOpenQueue) {
+-            Icon(Icons.AutoMirrored.Rounded.QueueMusic, contentDescription = "Open queue")
+-        }
+     }
+ }
+ 
+@@ -354,6 +387,7 @@ private fun PlayerDeck(
+     position: PositionSnapshot,
+     status: DspStatus,
+     path: AudioPathState,
++    outputMode: OutputModePreference,
+     isFavorite: Boolean,
+     sleepActive: Boolean,
+     viewModel: NowPlayingViewModel,
+@@ -393,11 +427,10 @@ private fun PlayerDeck(
+         }
+ 
+         Spacer(Modifier.height(VortexSpacing.md))
+-        SignalChips(
+-            status = status,
++        SourceChips(
+             formatLine = AudioFormatLabels.describe(path.input),
+             routeLine = routeLine(path.route),
+-            onOpenAudioLab = onOpenAudioLab,
++            onRouteClick = onOpenControlCenter,
+         )
+ 
+         val error = state.error
+@@ -418,30 +451,15 @@ private fun PlayerDeck(
+         Spacer(Modifier.height(VortexSpacing.sm))
+         Transport(state = state, viewModel = viewModel)
+ 
+-        val processorInPath = status.kind == DspStatusKind.Active || status.kind == DspStatusKind.BypassedByUser
+-        if (processorInPath) {
+-            Spacer(Modifier.height(VortexSpacing.md))
+-            val meter = rememberMeterDisplay(viewModel.meters)
+-            Row(verticalAlignment = Alignment.CenterVertically) {
+-                Text("OUT", style = InstrumentText.label, modifier = Modifier.padding(end = VortexSpacing.sm))
+-                CompactLevelMeter(meter, Modifier.weight(1f))
+-            }
+-        }
+-
+-        val next = upNext(state)
+-        Spacer(Modifier.height(VortexSpacing.lg))
+-        UpNextCard(next = next, shuffle = state.shuffleEnabled, onClick = onOpenQueue)
+-
+         val dsp by viewModel.dsp.collectAsStateWithLifecycle()
+-        Spacer(Modifier.height(VortexSpacing.md))
+-        AudioLabStrip(dsp = dsp, status = status, onClick = onOpenAudioLab)
++        Spacer(Modifier.height(VortexSpacing.lg))
++        AudioLabStrip(dsp = dsp, status = status, outputMode = outputMode, onClick = onOpenAudioLab)
+ 
+         Spacer(Modifier.height(VortexSpacing.lg))
+-        Row(Modifier.fillMaxWidth()) {
+-            ActionItem(Icons.Rounded.Speed, Format.speed(state.speed), state.speed != 1f, onOpenControlCenter, Modifier.weight(1f))
+-            ActionItem(Icons.Rounded.Bedtime, if (sleepActive) "Timer on" else "Sleep", sleepActive, onOpenControlCenter, Modifier.weight(1f))
+-            ActionItem(Icons.Rounded.Equalizer, "Audio Lab", status.isProcessing, onOpenAudioLab, Modifier.weight(1f))
+-            ActionItem(Icons.AutoMirrored.Rounded.QueueMusic, "Queue", false, onOpenQueue, Modifier.weight(1f))
++        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(VortexSpacing.sm)) {
++            ActionButton(Icons.AutoMirrored.Rounded.QueueMusic, "Queue", false, onOpenQueue, Modifier.weight(1f))
++            ActionButton(Icons.Rounded.Bedtime, if (sleepActive) "Timer on" else "Sleep timer", sleepActive, onOpenControlCenter, Modifier.weight(1f))
++            ActionButton(Icons.Rounded.Speed, Format.speed(state.speed), state.speed != 1f, onOpenControlCenter, Modifier.weight(1f))
+         }
+     }
+ }
+@@ -502,61 +520,47 @@ private fun Transport(state: PlaybackUiState, viewModel: NowPlayingViewModel) {
+     }
+ }
+ 
++/** Source and output as two chips: the file's format and where the sound goes. */
+ @Composable
+-private fun UpNextCard(next: QueueEntry?, shuffle: Boolean, onClick: () -> Unit) {
++private fun SourceChips(formatLine: String?, routeLine: String?, onRouteClick: () -> Unit) {
+     Row(
+-        Modifier
+-            .fillMaxWidth()
+-            .clip(RoundedCornerShape(16.dp))
+-            .background(VortexColors.Card.copy(alpha = 0.9f))
+-            .border(1.dp, VortexColors.Divider, RoundedCornerShape(16.dp))
+-            .clickable(role = Role.Button, onClickLabel = "Open queue", onClick = onClick)
+-            .padding(horizontal = VortexSpacing.lg, vertical = VortexSpacing.md),
++        Modifier.fillMaxWidth(),
+         verticalAlignment = Alignment.CenterVertically,
++        horizontalArrangement = Arrangement.spacedBy(VortexSpacing.sm),
+     ) {
+-        Column(Modifier.weight(1f)) {
+-            Text("UP NEXT", style = InstrumentText.label)
+-            Spacer(Modifier.height(2.dp))
+-            val (title, subtitle) = when {
+-                next != null -> next.title to next.artist
+-                shuffle -> "Shuffle is on" to "Open the queue to see the order"
+-                else -> "End of queue" to "Add songs from your library"
+-            }
+-            Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = VortexColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+-        }
+-        Icon(Icons.AutoMirrored.Rounded.QueueMusic, contentDescription = null, tint = VortexColors.TextSecondary)
++        TechChip(listOfNotNull("LOCAL", formatLine).joinToString(" · "))
++        if (routeLine != null) TechChip(routeLine, onClick = onRouteClick)
+     }
+ }
+ 
++private fun OutputModePreference.shortLabel(): String = when (this) {
++    OutputModePreference.Dsp -> "DSP"
++    OutputModePreference.Offload -> "Battery"
++}
++
+ @Composable
+-private fun ActionItem(icon: ImageVector, label: String, active: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+-    val tint = if (active) VortexColors.Accent else VortexColors.TextSecondary
+-    Column(
++private fun ActionButton(icon: ImageVector, label: String, active: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
++    val shape = RoundedCornerShape(14.dp)
++    Row(
+         modifier
+-            .clip(RoundedCornerShape(12.dp))
++            .clip(shape)
++            .background(VortexColors.Card)
++            .border(1.dp, if (active) VortexColors.Accent.copy(alpha = 0.6f) else VortexColors.Divider, shape)
+             .clickable(role = Role.Button, onClick = onClick)
+-            .heightIn(min = 56.dp)
+-            .padding(vertical = VortexSpacing.sm),
+-        horizontalAlignment = Alignment.CenterHorizontally,
+-        verticalArrangement = Arrangement.Center,
++            .heightIn(min = 52.dp)
++            .padding(horizontal = VortexSpacing.md),
++        verticalAlignment = Alignment.CenterVertically,
++        horizontalArrangement = Arrangement.Center,
+     ) {
+-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
+-        Spacer(Modifier.height(4.dp))
+-        Text(
+-            label,
+-            style = MaterialTheme.typography.labelSmall,
+-            color = if (active) VortexColors.TextPrimary else VortexColors.TextSecondary,
+-            maxLines = 1,
+-            softWrap = false,
+-            overflow = TextOverflow.Ellipsis,
+-        )
++        Icon(icon, contentDescription = null, tint = if (active) VortexColors.Accent else VortexColors.TextPrimary, modifier = Modifier.size(20.dp))
++        Spacer(Modifier.width(VortexSpacing.sm))
++        Text(label, style = MaterialTheme.typography.labelLarge, color = VortexColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+     }
+ }
+ 
+-/** The Audio Lab at a glance: processing state and the EQ curve the audio thread applies. */
++/** The Audio Lab at a glance: the EQ curve the audio thread applies and the output mode in use. */
+ @Composable
+-private fun AudioLabStrip(dsp: DspParameters, status: DspStatus, onClick: () -> Unit) {
++private fun AudioLabStrip(dsp: DspParameters, status: DspStatus, outputMode: OutputModePreference, onClick: () -> Unit) {
+     val shape = RoundedCornerShape(16.dp)
+     Row(
+         Modifier
+@@ -568,21 +572,42 @@ private fun AudioLabStrip(dsp: DspParameters, status: DspStatus, onClick: () ->
+             .padding(horizontal = VortexSpacing.md, vertical = VortexSpacing.sm),
+         verticalAlignment = Alignment.CenterVertically,
+     ) {
++        Icon(
++            Icons.Rounded.Equalizer,
++            contentDescription = null,
++            tint = if (status.isProcessing) VortexColors.Accent else VortexColors.TextSecondary,
++            modifier = Modifier.size(22.dp),
++        )
++        Spacer(Modifier.width(VortexSpacing.md))
+         Column(Modifier.weight(1f)) {
++            Text("Audio Lab", style = MaterialTheme.typography.titleSmall, maxLines = 1)
+             Text(
+-                "AUDIO LAB",
+-                style = InstrumentText.label.copy(color = if (status.isProcessing) VortexColors.Accent else VortexColors.TextSecondary),
++                "EQ · Tone · Output",
++                style = MaterialTheme.typography.bodySmall,
++                color = VortexColors.TextSecondary,
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis,
+             )
+-            Text(status.label, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+         }
+-        Spacer(Modifier.width(VortexSpacing.md))
+         EqCurve(
+             bandGainsDb = dsp.bandGainsDb,
+             active = dsp.enabled && status.isProcessing,
+-            modifier = Modifier.size(width = 128.dp, height = 44.dp),
++            modifier = Modifier.size(width = 72.dp, height = 40.dp),
+             bassDb = dsp.bassDb,
+             punchDb = dsp.punchDb,
+         )
++        Spacer(Modifier.width(VortexSpacing.sm))
++        Text(
++            outputMode.shortLabel(),
++            style = InstrumentText.readoutSmall,
++            color = VortexColors.TextPrimary,
++            maxLines = 1,
++            modifier = Modifier
++                .clip(RoundedCornerShape(10.dp))
++                .background(VortexColors.Card)
++                .border(1.dp, VortexColors.Divider, RoundedCornerShape(10.dp))
++                .padding(horizontal = 10.dp, vertical = 6.dp),
++        )
+     }
+ }
+ 
+diff --git a/app/src/main/java/com/vortexx/player/feature/nowplaying/PlayerParts.kt b/app/src/main/java/com/vortexx/player/feature/nowplaying/PlayerParts.kt
+index e4afe48..9aa73a6 100644
+--- a/app/src/main/java/com/vortexx/player/feature/nowplaying/PlayerParts.kt
++++ b/app/src/main/java/com/vortexx/player/feature/nowplaying/PlayerParts.kt
+@@ -144,7 +144,7 @@ fun VortexSeekBar(position: PositionSnapshot, durationMs: Long, onSeek: (Long) -
+             Text(Format.duration(shownMs), style = InstrumentText.readoutSmall)
+             Spacer(Modifier.weight(1f))
+             Text(
+-                if (duration > 0) "-" + Format.duration((duration - shownMs).coerceAtLeast(0L)) else "--:--",
++                if (duration > 0) Format.duration(duration) else "--:--",
+                 style = InstrumentText.readoutSmall,
+             )
+         }
