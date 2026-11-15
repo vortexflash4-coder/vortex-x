@@ -80,7 +80,7 @@ object SoundPresets {
 
     /** A name as it is stored: one line, trimmed, at most [MAX_NAME_LENGTH] characters; empty = not usable. */
     fun cleanName(raw: String): String =
-        raw.replace('\\t', ' ').replace('\\n', ' ').replace('\\r', ' ').trim().take(MAX_NAME_LENGTH).trim()
+        raw.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim().take(MAX_NAME_LENGTH).trim()
 
     /** True when [name] can be saved: not empty and not the name of a built-in preset. */
     fun isUsableName(name: String): Boolean =
@@ -95,14 +95,14 @@ object SoundPresets {
 
     /** One preset per line: name, a tab, the encoded settings. */
     fun encodeUser(presets: List<SoundPreset>): String =
-        presets.joinToString("\\n") { it.name + "\\t" + it.parameters.encode() }
+        presets.joinToString("\n") { it.name + "\t" + it.parameters.encode() }
 
     /** Reads what [encodeUser] wrote; lines that are not valid are left out. */
     fun decodeUser(raw: String?): List<SoundPreset> {
         if (raw.isNullOrBlank()) return emptyList()
         val presets = ArrayList<SoundPreset>()
-        for (line in raw.split('\\n')) {
-            val tab = line.indexOf('\\t')
+        for (line in raw.split('\n')) {
+            val tab = line.indexOf('\t')
             if (tab <= 0) continue
             val name = cleanName(line.substring(0, tab))
             val parameters = DspParameters.decode(line.substring(tab + 1)) ?: continue
