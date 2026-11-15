@@ -1,0 +1,926 @@
+diff --git a/app/src/main/java/com/vortexx/player/audio/dsp/Dynamics.kt b/app/src/main/java/com/vortexx/player/audio/dsp/Dynamics.kt
+index d6d7124..9083167 100644
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/Dynamics.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/Dynamics.kt
+@@ -34,6 +34,13 @@ class LookaheadLimiter {
+     var latencyFrames: Int = 0
+         private set
+ 
++    /**
++     * The largest amount, in sample units, by which the final safety clamp ever had to cut a sample
++     * since the last [reset]. 0 means the gain alone kept every sample under the ceiling: no clipping.
++     */
++    var largestClampExcess: Double = 0.0
++        private set
++
+     private var channels = 0
+     private var window = 0
+     private var releaseCoefficient = 0.0
+@@ -80,6 +87,7 @@ class LookaheadLimiter {
+         queueSize = 0
+         held = 1.0
+         frameNumber = 0L
++        largestClampExcess = 0.0
+     }
+ 
+     /**
+@@ -143,8 +151,16 @@ class LookaheadLimiter {
+             val delayed = delay[base + c]
+             delay[base + c] = frame[c]
+             var out = delayed * gain
+-            // Rounding can leave the last bit above the ceiling; the ceiling is a promise.
+-            if (out > CEILING) out = CEILING else if (out < -CEILING) out = -CEILING
++            // Rounding can leave the last bit above the ceiling; the ceiling is a promise. This is not
++            // a clipper: the gain above already keeps every sample under it, and the largest amount
++            // ever cut here is recorded so a test can show it stays at rounding size.
++            if (out > CEILING) {
++                if (out - CEILING > largestClampExcess) largestClampExcess = out - CEILING
++                out = CEILING
++            } else if (out < -CEILING) {
++                if (-CEILING - out > largestClampExcess) largestClampExcess = -CEILING - out
++                out = -CEILING
++            }
+             frame[c] = out
+         }
+         delayFrame++
+diff --git a/app/src/main/java/com/vortexx/player/audio/dsp/SoundPresets.kt b/app/src/main/java/com/vortexx/player/audio/dsp/SoundPresets.kt
+index 8783869..967a470 100644
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/SoundPresets.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/SoundPresets.kt
+@@ -3,6 +3,27 @@ package com.vortexx.player.audio.dsp
+ /** A named set of Audio Lab settings. [builtIn] presets ship with the app; the others are the user's. */
+ data class SoundPreset(val name: String, val parameters: DspParameters, val builtIn: Boolean)
+ 
++/** What a save, rename or delete of a user preset did, or why it did nothing. [done] is true when the list changed as asked. */
++enum class PresetResult(val done: Boolean) {
++    Saved(true),
++    Overwritten(true),
++    Renamed(true),
++    Deleted(true),
++
++    /** Another preset of the user already has that name. */
++    NameTaken(false),
++
++    /** Empty, or the name of a built-in preset. */
++    BadName(false),
++
++    /** All [SoundPresets.MAX_USER_PRESETS] places are used and the name is a new one. */
++    Full(false),
++    NotFound(false),
++}
++
++/** The user's presets after an edit, with what happened. When nothing changed, [presets] is the list that was passed in. */
++data class PresetEdit(val presets: List<SoundPreset>, val result: PresetResult)
++
+ /**
+  * The presets that ship with the app, and the storage format of the user's own.
+  * A preset sets the sound (preamp, EQ, bass, compressor, limiter, width). It
+@@ -59,11 +80,65 @@ object SoundPresets {
+     fun isUsableName(name: String): Boolean =
+         name.isNotEmpty() && BUILT_IN.none { it.name.equals(name, ignoreCase = true) }
+ 
+-    /** [presets] with [name] set to [parameters]: replaces a preset of that name, else adds it; the oldest goes when full. */
+-    fun withSaved(presets: List<SoundPreset>, name: String, parameters: DspParameters): List<SoundPreset> {
+-        val saved = SoundPreset(name, parameters.copy(enabled = true, speakerProtect = false), builtIn = false)
+-        val others = presets.filterNot { it.name.equals(name, ignoreCase = true) }
+-        return (others + saved).takeLast(MAX_USER_PRESETS)
++    private fun indexOfName(presets: List<SoundPreset>, name: String): Int =
++        presets.indexOfFirst { it.name.equals(name, ignoreCase = true) }
++
++    /**
++     * What saving [rawName] would do: [PresetResult.Overwritten] when a preset has that name (it keeps its
++     * place and its spelling), [PresetResult.Saved] when there is room, [PresetResult.Full] when all
++     * [MAX_USER_PRESETS] places are used, [PresetResult.BadName] when the name cannot be used.
++     * A preset is never deleted to make room.
++     */
++    fun saveOutcome(presets: List<SoundPreset>, rawName: String): PresetResult {
++        val name = cleanName(rawName)
++        if (!isUsableName(name)) return PresetResult.BadName
++        if (indexOfName(presets, name) >= 0) return PresetResult.Overwritten
++        return if (presets.size >= MAX_USER_PRESETS) PresetResult.Full else PresetResult.Saved
++    }
++
++    /** Saves [parameters] (without the two device switches) under [rawName]; see [saveOutcome]. */
++    fun save(presets: List<SoundPreset>, rawName: String, parameters: DspParameters): PresetEdit {
++        val result = saveOutcome(presets, rawName)
++        if (!result.done) return PresetEdit(presets, result)
++        val name = cleanName(rawName)
++        val sound = parameters.copy(enabled = true, speakerProtect = false)
++        val index = indexOfName(presets, name)
++        val edited = if (index >= 0) {
++            presets.mapIndexed { i, p -> if (i == index) SoundPreset(p.name, sound, builtIn = false) else p }
++        } else {
++            presets + SoundPreset(name, sound, builtIn = false)
++        }
++        return PresetEdit(edited, result)
++    }
++
++    /** [presets] with [name] set to [parameters]: replaces a preset of that name, else adds it while there is room. */
++    fun withSaved(presets: List<SoundPreset>, name: String, parameters: DspParameters): List<SoundPreset> =
++        save(presets, name, parameters).presets
++
++    /** What renaming [oldName] to [rawNew] would do. A change of letter case alone is allowed. */
++    fun renameOutcome(presets: List<SoundPreset>, oldName: String, rawNew: String): PresetResult {
++        val from = indexOfName(presets, oldName)
++        if (from < 0) return PresetResult.NotFound
++        val name = cleanName(rawNew)
++        if (!isUsableName(name)) return PresetResult.BadName
++        val other = indexOfName(presets, name)
++        return if (other >= 0 && other != from) PresetResult.NameTaken else PresetResult.Renamed
++    }
++
++    /** Gives the preset [oldName] the name [rawNew], keeping its place and its sound. */
++    fun rename(presets: List<SoundPreset>, oldName: String, rawNew: String): PresetEdit {
++        val result = renameOutcome(presets, oldName, rawNew)
++        if (!result.done) return PresetEdit(presets, result)
++        val from = indexOfName(presets, oldName)
++        val name = cleanName(rawNew)
++        return PresetEdit(presets.mapIndexed { i, p -> if (i == from) p.copy(name = name) else p }, result)
++    }
++
++    /** Removes the preset called [name]. */
++    fun delete(presets: List<SoundPreset>, name: String): PresetEdit {
++        val index = indexOfName(presets, name)
++        if (index < 0) return PresetEdit(presets, PresetResult.NotFound)
++        return PresetEdit(presets.filterIndexed { i, _ -> i != index }, PresetResult.Deleted)
+     }
+ 
+     /** One preset per line: name, a tab, the encoded settings. */
+@@ -82,6 +157,6 @@ object SoundPresets {
+             if (!isUsableName(name) || presets.any { it.name.equals(name, ignoreCase = true) }) continue
+             presets += SoundPreset(name, parameters, builtIn = false)
+         }
+-        return presets.takeLast(MAX_USER_PRESETS)
++        return presets.take(MAX_USER_PRESETS)
+     }
+ }
+diff --git a/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt b/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
+index c4ea4d7..b264720 100644
+--- a/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
++++ b/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
+@@ -13,6 +13,8 @@ import com.vortexx.player.audio.dsp.DynamicsMeters
+ import com.vortexx.player.audio.dsp.EqResponse
+ import com.vortexx.player.audio.dsp.LoadMeter
+ import com.vortexx.player.audio.dsp.MeterBus
++import com.vortexx.player.audio.dsp.PresetEdit
++import com.vortexx.player.audio.dsp.PresetResult
+ import com.vortexx.player.audio.dsp.ProcessorFormat
+ import com.vortexx.player.audio.dsp.SoundPreset
+ import com.vortexx.player.audio.dsp.SoundPresets
+@@ -137,19 +139,32 @@ class AudioEngine @Inject constructor(
+     fun applyPreset(preset: SoundPreset) =
+         publish(preset.parameters.copy(enabled = userParameters.enabled, speakerProtect = userParameters.speakerProtect))
+ 
+-    /** Saves the current sound under [name]. False when the name is empty or belongs to a built-in preset. */
+-    fun saveUserPreset(name: String): Boolean {
+-        val clean = SoundPresets.cleanName(name)
+-        if (!SoundPresets.isUsableName(clean)) return false
+-        storeUserPresets(SoundPresets.withSaved(_userPresets.value, clean, userParameters))
+-        return true
+-    }
+-
+-    fun deleteUserPreset(name: String) = storeUserPresets(_userPresets.value.filterNot { it.name == name })
+-
+-    private fun storeUserPresets(presets: List<SoundPreset>) {
+-        _userPresets.value = presets
+-        scope.launch { dataStore.edit { it[KEY_USER_PRESETS] = SoundPresets.encodeUser(presets) } }
++    /**
++     * Saves the current sound under [name]: a new preset while there is room, or a replacement of the
++     * preset with that name. Nothing is deleted to make room; with all
++     * [SoundPresets.MAX_USER_PRESETS] places used the result is [PresetResult.Full].
++     */
++    @Synchronized
++    fun saveUserPreset(name: String): PresetResult =
++        editUserPresets(SoundPresets.save(_userPresets.value, name, userParameters))
++
++    /** Gives the preset [name] a new name; its place and its sound stay. */
++    @Synchronized
++    fun renameUserPreset(name: String, newName: String): PresetResult =
++        editUserPresets(SoundPresets.rename(_userPresets.value, name, newName))
++
++    @Synchronized
++    fun deleteUserPreset(name: String): PresetResult =
++        editUserPresets(SoundPresets.delete(_userPresets.value, name))
++
++    private fun editUserPresets(edit: PresetEdit): PresetResult {
++        if (edit.result.done && edit.presets != _userPresets.value) {
++            _userPresets.value = edit.presets
++            // The write takes whatever the list is when it runs, so two quick edits can never
++            // leave the older list on disk.
++            scope.launch { dataStore.edit { it[KEY_USER_PRESETS] = SoundPresets.encodeUser(_userPresets.value) } }
++        }
++        return edit.result
+     }
+ 
+     /**
+diff --git a/app/src/main/java/com/vortexx/player/feature/studio/SoundControls.kt b/app/src/main/java/com/vortexx/player/feature/studio/SoundControls.kt
+index f86f42c..cc4704f 100644
+--- a/app/src/main/java/com/vortexx/player/feature/studio/SoundControls.kt
++++ b/app/src/main/java/com/vortexx/player/feature/studio/SoundControls.kt
+@@ -39,6 +39,7 @@ import com.vortexx.player.audio.dsp.BassTone
+ import com.vortexx.player.audio.dsp.DspParameters
+ import com.vortexx.player.audio.dsp.DynamicsMeters
+ import com.vortexx.player.audio.dsp.DynamicsReading
++import com.vortexx.player.audio.dsp.PresetResult
+ import com.vortexx.player.audio.dsp.SoundPreset
+ import com.vortexx.player.audio.dsp.SoundPresets
+ import com.vortexx.player.ui.designsystem.components.PillChip
+@@ -57,23 +58,31 @@ import kotlin.math.roundToInt
+ /**
+  * Preset strip: the built-in sounds, the user's own, and "Save mine". The
+  * highlighted chip is the preset whose settings equal the current ones; with
+- * no match the sound is shown as custom.
++ * no match the sound is shown as custom. A preset of the user's can be
++ * renamed or deleted while it is the highlighted one; saving under the name
++ * of an existing preset replaces it, and nothing is deleted to make room
++ * once all [SoundPresets.MAX_USER_PRESETS] places are used.
+  */
+ @Composable
+ fun PresetPanel(
+     parameters: DspParameters,
+     userPresets: List<SoundPreset>,
+     onApply: (SoundPreset) -> Unit,
+-    onSave: (String) -> Boolean,
++    onSave: (String) -> PresetResult,
++    onRename: (String, String) -> PresetResult,
+     onDelete: (String) -> Unit,
+ ) {
+     val selected = remember(parameters, userPresets) { SoundPresets.matching(parameters, userPresets) }
++    val mine = selected?.takeIf { !it.builtIn }
+     var naming by rememberSaveable { mutableStateOf(false) }
++    var renaming by rememberSaveable { mutableStateOf(false) }
++    var deleting by rememberSaveable { mutableStateOf(false) }
+     Column {
+         PanelLabel("Sound presets") {
+-            if (selected != null && !selected.builtIn) {
+-                TextButton(onClick = { onDelete(selected.name) }) {
+-                    Text("Delete \"${selected.name}\"", style = InstrumentText.readoutSmall)
++            if (mine != null) {
++                Row {
++                    TextButton(onClick = { renaming = true }) { Text("Rename", style = InstrumentText.readoutSmall) }
++                    TextButton(onClick = { deleting = true }) { Text("Delete", style = InstrumentText.readoutSmall) }
+                 }
+             } else if (selected == null) {
+                 Text("custom", style = InstrumentText.readoutSmall)
+@@ -91,33 +100,82 @@ fun PresetPanel(
+             }
+             PillChip("Save mine", selected = false, onClick = { naming = true }, icon = Icons.Rounded.Add)
+         }
+-        Hint("A preset sets preamp, EQ, bass, compressor, limiter and width together. Studio Flat changes nothing.")
++        Hint(
++            "A preset sets preamp, EQ, bass, compressor, limiter and width together. Studio Flat changes nothing. " +
++                "Saved by you: ${userPresets.size} of ${SoundPresets.MAX_USER_PRESETS}.",
++        )
+     }
+     if (naming) {
+         PresetNameDialog(
+-            onConfirm = { name -> if (onSave(name)) naming = false },
++            title = "Save this sound",
++            confirmLabel = "Save",
++            initial = "",
++            outcome = { name -> SoundPresets.saveOutcome(userPresets, name) },
++            onConfirm = { name -> if (onSave(name).done) naming = false },
+             onDismiss = { naming = false },
+         )
+     }
++    if (renaming && mine != null) {
++        PresetNameDialog(
++            title = "Rename preset",
++            confirmLabel = "Rename",
++            initial = mine.name,
++            outcome = { name -> SoundPresets.renameOutcome(userPresets, mine.name, name) },
++            onConfirm = { name -> if (onRename(mine.name, name).done) renaming = false },
++            onDismiss = { renaming = false },
++        )
++    }
++    if (deleting && mine != null) {
++        AlertDialog(
++            onDismissRequest = { deleting = false },
++            containerColor = VortexColors.Surface,
++            title = { Text("Delete \"${mine.name}\"?") },
++            text = { Text("The saved sound is removed. The settings you hear now stay as they are.") },
++            confirmButton = {
++                TextButton(onClick = {
++                    onDelete(mine.name)
++                    deleting = false
++                }) { Text("Delete") }
++            },
++            dismissButton = { TextButton(onClick = { deleting = false }) { Text("Cancel") } },
++        )
++    }
+ }
+ 
+ @Composable
+-private fun PresetNameDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+-    var name by rememberSaveable { mutableStateOf("") }
++private fun PresetNameDialog(
++    title: String,
++    confirmLabel: String,
++    initial: String,
++    outcome: (String) -> PresetResult,
++    onConfirm: (String) -> Unit,
++    onDismiss: () -> Unit,
++) {
++    var name by rememberSaveable { mutableStateOf(initial) }
+     val clean = SoundPresets.cleanName(name)
+-    val usable = SoundPresets.isUsableName(clean)
++    val result = if (clean.isEmpty()) PresetResult.BadName else outcome(clean)
++    val blocked = !result.done
++    val message: String? = when {
++        clean.isEmpty() -> null
++        result == PresetResult.BadName -> "That name belongs to a built-in preset"
++        result == PresetResult.NameTaken -> "Another preset already has that name"
++        result == PresetResult.Full ->
++            "All ${SoundPresets.MAX_USER_PRESETS} places are used. Delete one first, or type the name of one to replace it."
++        result == PresetResult.Overwritten -> "Replaces the saved sound that has this name"
++        else -> null
++    }
+     AlertDialog(
+         onDismissRequest = onDismiss,
+         containerColor = VortexColors.Surface,
+-        title = { Text("Save this sound") },
++        title = { Text(title) },
+         text = {
+             OutlinedTextField(
+                 value = name,
+                 onValueChange = { name = it.take(SoundPresets.MAX_NAME_LENGTH) },
+                 singleLine = true,
+                 label = { Text("Preset name") },
+-                isError = clean.isNotEmpty() && !usable,
+-                supportingText = { if (clean.isNotEmpty() && !usable) Text("That name belongs to a built-in preset") },
++                isError = blocked && message != null,
++                supportingText = { if (message != null) Text(message) },
+                 colors = OutlinedTextFieldDefaults.colors(
+                     focusedBorderColor = VortexColors.Accent,
+                     focusedLabelColor = VortexColors.AccentActive,
+@@ -125,7 +183,11 @@ private fun PresetNameDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit)
+                 ),
+             )
+         },
+-        confirmButton = { TextButton(onClick = { onConfirm(clean) }, enabled = usable) { Text("Save") } },
++        confirmButton = {
++            TextButton(onClick = { onConfirm(clean) }, enabled = !blocked) {
++                Text(if (result == PresetResult.Overwritten) "Replace" else confirmLabel)
++            }
++        },
+         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+     )
+ }
+diff --git a/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt b/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt
+index 657ed4e..ecc106d 100644
+--- a/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/studio/StudioScreen.kt
+@@ -39,6 +39,7 @@ import com.vortexx.player.audio.dsp.EqResponse
+ import com.vortexx.player.audio.dsp.GraphicEqBands
+ import com.vortexx.player.audio.dsp.LoadReading
+ import com.vortexx.player.audio.dsp.MeterBus
++import com.vortexx.player.audio.dsp.PresetResult
+ import com.vortexx.player.audio.dsp.SoundPreset
+ import com.vortexx.player.audio.engine.AudioDiagnostics
+ import com.vortexx.player.audio.engine.AudioEngine
+@@ -141,8 +142,11 @@ class StudioViewModel @Inject constructor(
+     fun setLimiter(on: Boolean) = engine.setLimiter(on)
+     fun setWidth(percent: Int) = engine.setWidth(percent)
+     fun applyPreset(preset: SoundPreset) = engine.applyPreset(preset)
+-    fun savePreset(name: String): Boolean = engine.saveUserPreset(name)
+-    fun deletePreset(name: String) = engine.deleteUserPreset(name)
++    fun savePreset(name: String): PresetResult = engine.saveUserPreset(name)
++    fun renamePreset(name: String, newName: String): PresetResult = engine.renameUserPreset(name, newName)
++    fun deletePreset(name: String) {
++        engine.deleteUserPreset(name)
++    }
+     fun autoHeadroom() = engine.applyAutoHeadroom()
+     fun setOutputMode(mode: OutputModePreference) = engine.setOutputMode(mode)
+     fun resetClipCounter() = engine.meters.resetClipCounter()
+@@ -229,6 +233,7 @@ fun StudioScreen(
+                     userPresets = userPresets,
+                     onApply = viewModel::applyPreset,
+                     onSave = viewModel::savePreset,
++                    onRename = viewModel::renamePreset,
+                     onDelete = viewModel::deletePreset,
+                 )
+             }
+diff --git a/app/src/test/java/com/vortexx/player/LimiterSpecTest.kt b/app/src/test/java/com/vortexx/player/LimiterSpecTest.kt
+new file mode 100644
+index 0000000..35bab15
+--- /dev/null
++++ b/app/src/test/java/com/vortexx/player/LimiterSpecTest.kt
+@@ -0,0 +1,221 @@
++package com.vortexx.player
++
++import com.vortexx.player.audio.dsp.BassTone
++import com.vortexx.player.audio.dsp.BiquadCoefficients
++import com.vortexx.player.audio.dsp.DspChain
++import com.vortexx.player.audio.dsp.DspParameters
++import com.vortexx.player.audio.dsp.LookaheadLimiter
++import com.vortexx.player.audio.dsp.MultibandCompressor
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import kotlin.math.PI
++import kotlin.math.abs
++import kotlin.math.log10
++import kotlin.math.max
++import kotlin.math.pow
++import kotlin.math.sin
++import kotlin.math.sqrt
++
++/**
++ * The Audio Lab's written promises, one by one: the limiter's ceiling, look-ahead,
++ * recovery and cleanliness, and the speaker-protect filter. The older
++ * measurements in DynamicsTest stay as they are; these add what they did not pin down.
++ */
++class LimiterSpecTest {
++
++    private val rate = 48_000
++
++    private fun db(ratio: Double): Double = 20 * log10(ratio)
++
++    private fun sine(freq: Double, frames: Int, amplitude: Double): DoubleArray =
++        DoubleArray(frames) { amplitude * sin(2 * PI * freq * it / rate) }
++
++    private fun limit(input: DoubleArray): DoubleArray {
++        val limiter = LookaheadLimiter()
++        limiter.configure(rate, 1)
++        val frame = DoubleArray(1)
++        return DoubleArray(input.size) {
++            frame[0] = input[it]
++            limiter.process(frame)
++            frame[0]
++        }
++    }
++
++    /** Steady-state gain in dB of a chain set to [p] for a quiet tone at [freq]. */
++    private fun chainGainDb(freq: Double, p: DspParameters): Double {
++        val chain = DspChain()
++        chain.configure(rate, 1)
++        chain.apply(p)
++        val input = FloatArray(rate) { (0.02 * sin(2 * PI * freq * it / rate)).toFloat() }
++        val output = input.copyOf()
++        chain.process(output, rate)
++        var inSquares = 0.0
++        var outSquares = 0.0
++        for (i in rate / 2 until rate) {
++            inSquares += input[i] * input[i]
++            outSquares += output[i] * output[i]
++        }
++        return db(sqrt(outSquares / inSquares))
++    }
++
++    @Test
++    fun ceilingIsLockedAtMinusHalfADecibelAndLookAheadIsFiveMilliseconds() {
++        assertEquals(-0.5, LookaheadLimiter.CEILING_DB, 0.0)
++        assertEquals(10.0.pow(-0.5 / 20.0), LookaheadLimiter.CEILING, 1e-15)
++        for (sampleRate in intArrayOf(44_100, 48_000, 96_000)) {
++            val limiter = LookaheadLimiter()
++            limiter.configure(sampleRate, 2)
++            val milliseconds = limiter.latencyFrames * 1000.0 / sampleRate
++            DspMeasure.record(
++                "Limiter look-ahead at ${DspMeasure.f(sampleRate / 1000.0, 1)} kHz",
++                DspMeasure.f(milliseconds, 3) + " ms",
++                "5 ± 0.03 ms",
++                abs(milliseconds - 5.0) <= 0.03,
++            )
++            assertEquals(5.0, milliseconds, 0.03)
++        }
++    }
++
++    @Test
++    fun wholeChainHoldsTheCeilingWithEverythingBoostedToTheMaximum() {
++        // Every EQ band, bass, kick band and preamp at their top, a full-scale signal: far over 0 dBFS before the limiter.
++        val everything = DspParameters(
++            preampDb = 12f,
++            bandGainsDb = List(10) { 12f },
++            bassDb = 12f,
++            punchDb = 9f,
++            compressor = 100,
++            limiter = true,
++        )
++        val chain = DspChain()
++        chain.configure(rate, 2)
++        chain.apply(everything)
++        var seed = 7L
++        val block = 480
++        val buffer = FloatArray(block * 2)
++        var highest = 0f
++        var clipped = 0
++        var written = 0
++        repeat(rate * 2 / block) {
++            for (i in 0 until block) {
++                seed = seed * 6364136223846793005L + 1442695040888963407L
++                val noise = ((seed ushr 33).toInt() / Int.MAX_VALUE.toDouble()) * 2.0 - 1.0
++                val t = written + i
++                buffer[i * 2] = (0.9 * sin(2 * PI * 50 * t / rate) + 0.1 * noise).toFloat().coerceIn(-1f, 1f)
++                buffer[i * 2 + 1] = (0.9 * sin(2 * PI * 3000 * t / rate) + 0.1 * noise).toFloat().coerceIn(-1f, 1f)
++            }
++            written += block
++            clipped += chain.process(buffer, block)
++            for (sample in buffer) highest = max(highest, abs(sample))
++        }
++        val limit = LookaheadLimiter.CEILING.toFloat()
++        DspMeasure.record(
++            "Whole chain, everything at maximum, 2 s of loud music: highest output sample / samples over 0 dBFS",
++            "${DspMeasure.f(db(highest.toDouble()), 3)} dBFS / $clipped",
++            "≤ ${LookaheadLimiter.CEILING_DB} dBFS / 0",
++            highest <= limit && clipped == 0,
++        )
++        assertEquals(0, clipped)
++        assertTrue("highest output $highest", highest <= limit)
++    }
++
++    @Test
++    fun limiterIsBackToExactUnityWithinThreeSecondsFromEveryDepthOfReduction() {
++        val delay = (LookaheadLimiter.LOOKAHEAD_SECONDS * rate).toInt()
++        val burst = rate / 10
++        var worst = 0.0
++        for (peak in doubleArrayOf(1.2, 3.0, 30.0, 1000.0)) {
++            val signal = sine(100.0, burst, peak) + sine(440.0, rate * 5, 0.3)
++            val out = limit(signal)
++            var lastChanged = -1
++            for (i in delay until out.size) if (out[i] != signal[i - delay]) lastChanged = i
++            val seconds = (lastChanged - burst) / rate.toDouble()
++            worst = max(worst, seconds)
++            assertTrue("peak ${db(peak)} dBFS: still changing $seconds s after the loud moment", seconds < 3.0)
++            assertTrue("peak ${db(peak)} dBFS: the signal after the loud moment never came back", lastChanged < out.size - rate)
++        }
++        DspMeasure.record(
++            "Limiter: slowest return to exact unity (input from +1.6 up to +60 dBFS)",
++            DspMeasure.f(worst, 2) + " s",
++            "< 3 s",
++            worst < 3.0,
++        )
++    }
++
++    @Test
++    fun limiterNeverNeedsItsSafetyClampAndSoAddsNoSaturation() {
++        // A sweep from 20 Hz to 20 kHz at +18 dBFS, a 45 Hz note at +12 dBFS and a full-scale square wave: all at once on two channels.
++        val limiter = LookaheadLimiter()
++        limiter.configure(rate, 2)
++        val frame = DoubleArray(2)
++        val frames = rate * 4
++        var phase = 0.0
++        var highest = 0.0
++        for (i in 0 until frames) {
++            val freq = 20.0 * 1000.0.pow(i.toDouble() / frames)
++            phase += 2 * PI * freq / rate
++            frame[0] = 8.0 * sin(phase) + 4.0 * sin(2 * PI * 45 * i / rate)
++            frame[1] = if ((i / 2400) % 2 == 0) 1.7 else -1.7
++            limiter.process(frame)
++            highest = max(highest, max(abs(frame[0]), abs(frame[1])))
++        }
++        val excess = limiter.largestClampExcess
++        DspMeasure.record(
++            "Limiter: largest amount the final safety clamp ever cut (0 = the gain alone held the ceiling)",
++            if (excess == 0.0) "0 (never engaged)" else String.format(java.util.Locale.ROOT, "%.1e", excess),
++            "< 1e-9 (−180 dBFS)",
++            excess < 1e-9,
++        )
++        assertTrue("clamp had to cut $excess", excess < 1e-9)
++        assertTrue("highest output $highest", highest <= LookaheadLimiter.CEILING)
++    }
++
++    @Test
++    fun speakerProtectIsAnEightyHertzButterworthHighPassAndReallySwitches() {
++        val on = DspParameters(speakerProtect = true)
++        val corner = chainGainDb(BassTone.PROTECT_HZ, on)
++        val octaveBelow = chainGainDb(BassTone.PROTECT_HZ / 2, on)
++        val twoOctavesBelow = chainGainDb(BassTone.PROTECT_HZ / 4, on)
++        val octaveAbove = chainGainDb(BassTone.PROTECT_HZ * 2, on)
++        DspMeasure.record("Speaker protect: gain at the 80 Hz corner", DspMeasure.f(corner, 2) + " dB", "−3.01 ± 0.2 dB (Butterworth)", abs(corner + 3.01) <= 0.2)
++        DspMeasure.record("Speaker protect: gain at 40 Hz / 20 Hz (12 dB per octave)", "${DspMeasure.f(octaveBelow, 1)} / ${DspMeasure.f(twoOctavesBelow, 1)} dB", "−12.3 / −24.1 ± 0.4 dB", abs(octaveBelow + 12.3) <= 0.4 && abs(twoOctavesBelow + 24.1) <= 0.4)
++        DspMeasure.record("Speaker protect: gain at 160 Hz", DspMeasure.f(octaveAbove, 2) + " dB", "−0.26 ± 0.1 dB", abs(octaveAbove + 0.26) <= 0.1)
++        assertEquals(-3.01, corner, 0.2)
++        assertEquals(-12.3, octaveBelow, 0.4)
++        assertEquals(-24.1, twoOctavesBelow, 0.4)
++        assertEquals(-0.26, octaveAbove, 0.1)
++
++        // Butterworth is the flattest possible: no bump anywhere above the corner, and the gain only rises with frequency.
++        val filter = BiquadCoefficients().apply { setHighPass(rate, BassTone.PROTECT_HZ, MultibandCompressor.BUTTERWORTH_Q) }
++        var previous = -200.0
++        for (freq in doubleArrayOf(10.0, 20.0, 40.0, 60.0, 80.0, 100.0, 160.0, 300.0, 1000.0, 5000.0, 15000.0)) {
++            val gain = filter.magnitudeDb(freq, rate)
++            assertTrue("gain must not fall as frequency rises: $freq Hz", gain >= previous)
++            assertTrue("no peak: $gain dB at $freq Hz", gain <= 0.0001)
++            previous = gain
++        }
++
++        // Off means off: the bass passes at exactly the level it came in.
++        val off = chainGainDb(30.0, DspParameters(speakerProtect = false))
++        DspMeasure.record("Speaker protect off: 30 Hz", DspMeasure.f(off, 4) + " dB", "0 ± 0.001 dB", abs(off) <= 0.001)
++        assertEquals(0.0, off, 0.001)
++    }
++
++    @Test
++    fun switchingSpeakerProtectOffAgainLeavesTheSamplesBitIdentical() {
++        val chain = DspChain()
++        chain.configure(rate, 1)
++        chain.apply(DspParameters(speakerProtect = true))
++        val tone = FloatArray(rate / 5) { (0.2 * sin(2 * PI * 30.0 * it / rate)).toFloat() }
++        chain.process(tone.copyOf(), tone.size)
++        chain.apply(DspParameters(speakerProtect = false))
++        chain.process(tone.copyOf(), tone.size) // 200 ms: the 20 ms fade is over
++        val after = tone.copyOf()
++        chain.process(after, after.size)
++        var changed = 0
++        for (i in after.indices) if (after[i] != tone[i]) changed++
++        DspMeasure.record("Speaker protect switched on then off: changed samples", "$changed of ${after.size}", "0", changed == 0)
++        assertEquals(0, changed)
++    }
++}
+diff --git a/app/src/test/java/com/vortexx/player/UserPresetStorageTest.kt b/app/src/test/java/com/vortexx/player/UserPresetStorageTest.kt
+new file mode 100644
+index 0000000..53fc4ad
+--- /dev/null
++++ b/app/src/test/java/com/vortexx/player/UserPresetStorageTest.kt
+@@ -0,0 +1,145 @@
++package com.vortexx.player
++
++import androidx.datastore.core.DataStore
++import androidx.datastore.preferences.core.PreferenceDataStoreFactory
++import androidx.datastore.preferences.core.Preferences
++import androidx.datastore.preferences.core.floatPreferencesKey
++import androidx.datastore.preferences.core.stringPreferencesKey
++import com.vortexx.player.audio.dsp.PresetResult
++import com.vortexx.player.audio.dsp.SoundPresets
++import com.vortexx.player.audio.engine.AudioEngine
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.cancel
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withTimeoutOrNull
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
++import org.junit.Rule
++import org.junit.Test
++import org.junit.rules.TemporaryFolder
++import java.io.File
++
++/**
++ * The Audio Lab's settings and the user's presets in a real Jetpack DataStore file:
++ * written by one engine, read back by a second engine that opens a copy of the file
++ * on disk, which is what a restart of the app does.
++ */
++class UserPresetStorageTest {
++
++    @get:Rule
++    val folder = TemporaryFolder()
++
++    private val presetsKey = stringPreferencesKey("dsp_user_presets")
++    private val punchKey = floatPreferencesKey("dsp_punch_db")
++
++    private class Session(file: File) {
++        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++        val store: DataStore<Preferences> = PreferenceDataStoreFactory.create(scope = scope) { file }
++        val engine = AudioEngine(store, scope)
++    }
++
++    private suspend fun until(what: String, condition: suspend () -> Boolean) {
++        val reached = withTimeoutOrNull(10_000) {
++            while (!condition()) delay(25)
++            true
++        }
++        assertNotNull("timed out waiting for: $what", reached)
++    }
++
++    private suspend fun open(file: File): Session {
++        val session = Session(file)
++        until("the engine to load its settings") { session.engine.loaded.value }
++        return session
++    }
++
++    @Test
++    fun presetsAndSoundComeBackAfterARestart() {
++        runBlocking {
++            val file = File(folder.newFolder("first"), "vortex.preferences_pb")
++            val first = open(file)
++            val engine = first.engine
++            engine.setBass(7f)
++            engine.setCompressor(40)
++            engine.setLimiter(true)
++            assertEquals(PresetResult.Saved, engine.saveUserPreset("Night"))
++            engine.setBass(3f)
++            assertEquals(PresetResult.Saved, engine.saveUserPreset("Gym"))
++            assertEquals(PresetResult.Renamed, engine.renameUserPreset("Gym", "Run"))
++            assertEquals(PresetResult.Saved, engine.saveUserPreset("Temp"))
++            assertEquals(PresetResult.Deleted, engine.deleteUserPreset("Temp"))
++            engine.setPunch(4f)
++            assertEquals(listOf("Night", "Run"), engine.userPresets.value.map { it.name })
++
++            until("presets and settings to reach the file") {
++                val saved = first.store.data.first()
++                val line = saved[presetsKey].orEmpty()
++                line.contains("Night") && line.contains("Run") && !line.contains("Gym") && !line.contains("Temp") &&
++                    saved[punchKey] == 4f
++            }
++
++            // "Restart": a new store and a new engine over a copy of the file as it is on disk.
++            val copy = File(folder.newFolder("second"), "vortex.preferences_pb")
++            file.copyTo(copy)
++            val second = open(copy)
++
++            assertEquals(engine.userPresets.value, second.engine.userPresets.value)
++            assertEquals(listOf("Night", "Run"), second.engine.userPresets.value.map { it.name })
++            assertEquals(7f, second.engine.userPresets.value[0].parameters.bassDb)
++            assertEquals(3f, second.engine.userPresets.value[1].parameters.bassDb)
++            assertEquals(engine.state.value, second.engine.state.value)
++            assertEquals(4f, second.engine.state.value.punchDb)
++            assertEquals(40, second.engine.state.value.compressor)
++            assertEquals(true, second.engine.state.value.limiter)
++
++            first.scope.cancel()
++            second.scope.cancel()
++        }
++    }
++
++    @Test
++    fun quickEditsNeverLeaveAnOlderListOnDisk() {
++        runBlocking {
++            val file = File(folder.newFolder("quick"), "vortex.preferences_pb")
++            val session = open(file)
++            val engine = session.engine
++            repeat(5) {
++                engine.saveUserPreset("A")
++                engine.saveUserPreset("B")
++                engine.renameUserPreset("A", "C")
++                engine.deleteUserPreset("B")
++                engine.deleteUserPreset("C")
++            }
++            engine.saveUserPreset("Last")
++            until("the file to hold the final list") {
++                SoundPresets.decodeUser(session.store.data.first()[presetsKey]).map { it.name } == listOf("Last")
++            }
++            assertEquals(listOf("Last"), engine.userPresets.value.map { it.name })
++            session.scope.cancel()
++        }
++    }
++
++    @Test
++    fun twelvePresetsAreStoredAndTheThirteenthIsRefused() {
++        runBlocking {
++            val file = File(folder.newFolder("limit"), "vortex.preferences_pb")
++            val session = open(file)
++            val engine = session.engine
++            for (i in 1..12) assertEquals(PresetResult.Saved, engine.saveUserPreset("Sound $i"))
++            assertEquals(PresetResult.Full, engine.saveUserPreset("Thirteenth"))
++            assertEquals(PresetResult.Overwritten, engine.saveUserPreset("sound 7"))
++            assertEquals(PresetResult.NameTaken, engine.renameUserPreset("Sound 1", "Sound 2"))
++            assertEquals(12, engine.userPresets.value.size)
++            assertEquals("Sound 1", engine.userPresets.value.first().name)
++            until("twelve presets in the file") {
++                SoundPresets.decodeUser(session.store.data.first()[presetsKey]).size == 12
++            }
++            val stored = SoundPresets.decodeUser(session.store.data.first()[presetsKey])
++            assertEquals(engine.userPresets.value, stored)
++            session.scope.cancel()
++        }
++    }
++}
+diff --git a/app/src/test/java/com/vortexx/player/UserPresetTest.kt b/app/src/test/java/com/vortexx/player/UserPresetTest.kt
+new file mode 100644
+index 0000000..5eabe83
+--- /dev/null
++++ b/app/src/test/java/com/vortexx/player/UserPresetTest.kt
+@@ -0,0 +1,140 @@
++package com.vortexx.player
++
++import com.vortexx.player.audio.dsp.DspParameters
++import com.vortexx.player.audio.dsp.PresetResult
++import com.vortexx.player.audio.dsp.SoundPreset
++import com.vortexx.player.audio.dsp.SoundPresets
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertSame
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/** The user's own presets: save, load, rename, overwrite, delete, and the limit of 12. */
++class UserPresetTest {
++
++    private val sound = DspParameters(bassDb = 7f, compressor = 40, limiter = true)
++
++    private fun fill(count: Int): List<SoundPreset> {
++        var list = emptyList<SoundPreset>()
++        for (i in 1..count) {
++            val edit = SoundPresets.save(list, "Sound $i", sound.copy(bassDb = i / 2f))
++            assertEquals(PresetResult.Saved, edit.result)
++            list = edit.presets
++        }
++        return list
++    }
++
++    @Test
++    fun twelvePlacesAndNothingIsDeletedToMakeRoom() {
++        val full = fill(SoundPresets.MAX_USER_PRESETS)
++        assertEquals(12, SoundPresets.MAX_USER_PRESETS)
++        assertEquals(12, full.size)
++
++        val thirteenth = SoundPresets.save(full, "Thirteenth", sound)
++        assertEquals(PresetResult.Full, thirteenth.result)
++        assertSame(full, thirteenth.presets)
++        assertEquals("Sound 1", thirteenth.presets.first().name)
++        assertEquals(PresetResult.Full, SoundPresets.saveOutcome(full, "Thirteenth"))
++
++        // The old behaviour dropped "Sound 1" here; it must be gone.
++        assertEquals(full, SoundPresets.withSaved(full, "Thirteenth", sound))
++
++        // A full list can still replace a preset by name, and a delete frees a place.
++        val replaced = SoundPresets.save(full, "sound 3", sound.copy(bassDb = 11f))
++        assertEquals(PresetResult.Overwritten, replaced.result)
++        assertEquals(12, replaced.presets.size)
++        assertEquals("Sound 3", replaced.presets[2].name)
++        assertEquals(11f, replaced.presets[2].parameters.bassDb)
++
++        val deleted = SoundPresets.delete(full, "SOUND 1")
++        assertEquals(PresetResult.Deleted, deleted.result)
++        assertEquals(11, deleted.presets.size)
++        val added = SoundPresets.save(deleted.presets, "Thirteenth", sound)
++        assertEquals(PresetResult.Saved, added.result)
++        assertEquals("Thirteenth", added.presets.last().name)
++        assertEquals(12, added.presets.size)
++    }
++
++    @Test
++    fun saveKeepsTheSoundButNotTheDeviceSwitches() {
++        val edit = SoundPresets.save(emptyList(), "  Night\tdrive \n", sound.copy(enabled = false, speakerProtect = true))
++        assertEquals(PresetResult.Saved, edit.result)
++        val preset = edit.presets.single()
++        assertEquals("Night drive", preset.name)
++        assertFalse(preset.builtIn)
++        assertTrue(preset.parameters.enabled)
++        assertFalse(preset.parameters.speakerProtect)
++        assertEquals(7f, preset.parameters.bassDb)
++        assertEquals(40, preset.parameters.compressor)
++
++        assertEquals(PresetResult.BadName, SoundPresets.save(edit.presets, "   ", sound).result)
++        assertEquals(PresetResult.BadName, SoundPresets.save(edit.presets, "Hard DJ Bass", sound).result)
++        assertEquals(PresetResult.BadName, SoundPresets.save(edit.presets, "cinema", sound).result)
++        assertEquals(1, edit.presets.size)
++    }
++
++    @Test
++    fun renameKeepsPlaceAndSoundAndRefusesNamesThatAreTakenOrNotAllowed() {
++        var list = SoundPresets.save(emptyList(), "Night", sound.copy(bassDb = 1f)).presets
++        list = SoundPresets.save(list, "Gym", sound.copy(bassDb = 2f)).presets
++        list = SoundPresets.save(list, "Road", sound.copy(bassDb = 3f)).presets
++        val gym = list[1]
++
++        val renamed = SoundPresets.rename(list, "Gym", "  Run  ")
++        assertEquals(PresetResult.Renamed, renamed.result)
++        assertEquals(listOf("Night", "Run", "Road"), renamed.presets.map { it.name })
++        assertEquals(gym.parameters, renamed.presets[1].parameters)
++        list = renamed.presets
++
++        assertEquals(PresetResult.NameTaken, SoundPresets.renameOutcome(list, "Run", "night"))
++        assertSame(list, SoundPresets.rename(list, "Run", "NIGHT").presets)
++        assertEquals(PresetResult.BadName, SoundPresets.renameOutcome(list, "Run", "Cinema"))
++        assertEquals(PresetResult.BadName, SoundPresets.renameOutcome(list, "Run", "   "))
++        assertEquals(PresetResult.NotFound, SoundPresets.renameOutcome(list, "Missing", "Other"))
++        assertSame(list, SoundPresets.rename(list, "Missing", "Other").presets)
++
++        // Only the letter case changes: allowed.
++        val recased = SoundPresets.rename(list, "Run", "RUN")
++        assertEquals(PresetResult.Renamed, recased.result)
++        assertEquals(listOf("Night", "RUN", "Road"), recased.presets.map { it.name })
++
++        // Renaming works on a full list too.
++        val full = fill(SoundPresets.MAX_USER_PRESETS)
++        assertEquals(PresetResult.Renamed, SoundPresets.rename(full, "Sound 12", "Last").result)
++    }
++
++    @Test
++    fun deleteRemovesOnlyThatPresetAndReportsAMissingOne() {
++        val list = fill(3)
++        val deleted = SoundPresets.delete(list, "Sound 2")
++        assertEquals(PresetResult.Deleted, deleted.result)
++        assertEquals(listOf("Sound 1", "Sound 3"), deleted.presets.map { it.name })
++        val missing = SoundPresets.delete(list, "Nothing")
++        assertEquals(PresetResult.NotFound, missing.result)
++        assertSame(list, missing.presets)
++    }
++
++    @Test
++    fun everyEditSurvivesTheStorageFormat() {
++        var list = fill(5)
++        list = SoundPresets.rename(list, "Sound 2", "Two").presets
++        list = SoundPresets.delete(list, "Sound 4").presets
++        list = SoundPresets.save(list, "sound 5", sound.copy(bassDb = 9f)).presets
++        assertEquals(list, SoundPresets.decodeUser(SoundPresets.encodeUser(list)))
++        // Damaged storage never gives more than 12 presets and never loses the first ones.
++        val tooMany = (1..15).joinToString("\n") { "Sound $it\t" + sound.encode() }
++        val decoded = SoundPresets.decodeUser(tooMany)
++        assertEquals(12, decoded.size)
++        assertEquals("Sound 1", decoded.first().name)
++    }
++
++    @Test
++    fun loadingAPresetGivesBackTheSavedSoundAndItIsRecognisedAsSelected() {
++        val mine = DspParameters(bassDb = 5f, punchDb = 3f, compressor = 20, limiter = true, widthPercent = 120)
++        val list = SoundPresets.save(emptyList(), "Mine", mine).presets
++        val loaded = list.single().parameters.copy(enabled = false, speakerProtect = true)
++        assertEquals(list.single(), SoundPresets.matching(loaded, list))
++        assertEquals(mine, list.single().parameters)
++    }
++}
