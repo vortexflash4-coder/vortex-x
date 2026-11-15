@@ -478,6 +478,36 @@ class DynamicsTest {
     fun presetsAndTheirStorage() {
         assertEquals(listOf("Studio Flat", "Hard DJ Bass", "Punchy Club", "Vocal Boost", "Cinema"), SoundPresets.BUILT_IN.map { it.name })
         assertTrue(SoundPresets.STUDIO_FLAT.parameters.isFlat)
+        assertEquals(false, SoundPresets.STUDIO_FLAT.parameters.limiter)
+
+        // Exact calibration contract: [31, 63, 125, 250, 500, 1k, 2k, 4k, 8k, 16k] Hz.
+        val dj = SoundPresets.HARD_DJ_BASS.parameters
+        assertEquals(-1.5f, dj.preampDb)
+        assertEquals(listOf(2f, 1.5f, -2.5f, -2f, -1f, 0f, -1f, -1.5f, 1f, 1.5f), dj.bandGainsDb)
+        assertEquals(5f, dj.bassDb)
+        assertEquals(4.5f, dj.punchDb)
+        assertEquals(35, dj.compressor)
+        assertEquals(105, dj.widthPercent)
+        assertFalse(dj.speakerProtect)
+
+        val club = SoundPresets.PUNCHY_CLUB.parameters
+        assertEquals(listOf(0f, 0f, -2f, -1.5f, 0f, 0f, 0f, -1f, 0f, 2f), club.bandGainsDb)
+        assertEquals(3.5f, club.bassDb)
+        assertEquals(6f, club.punchDb)
+        assertEquals(45, club.compressor)
+        assertEquals(115, club.widthPercent)
+
+        val vocal = SoundPresets.VOCAL_BOOST.parameters
+        assertEquals(listOf(0f, 0f, 0f, -2.5f, 0f, 0f, 2.5f, 3f, 0f, 0f), vocal.bandGainsDb)
+        assertEquals(30, vocal.compressor)
+
+        val cinema = SoundPresets.CINEMA.parameters
+        assertEquals(listOf(0f, 0f, 0f, -1.5f, 0f, 0f, 1.5f, 0f, 0f, 1f), cinema.bandGainsDb)
+        assertEquals(3f, cinema.bassDb)
+        assertEquals(2f, cinema.punchDb)
+        assertEquals(25, cinema.compressor)
+        assertEquals(130, cinema.widthPercent)
+
         for (preset in SoundPresets.BUILT_IN) {
             val p = preset.parameters
             assertEquals(p, DspParameters.decode(p.encode()))
