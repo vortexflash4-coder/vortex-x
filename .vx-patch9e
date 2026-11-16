@@ -1,0 +1,98 @@
+diff --git a/.github/scripts/ci-smoke.sh b/.github/scripts/ci-smoke.sh
+index 77a0705..44f5c84 100755
+--- a/.github/scripts/ci-smoke.sh
++++ b/.github/scripts/ci-smoke.sh
+@@ -107,20 +107,31 @@ for perm in READ_MEDIA_AUDIO READ_MEDIA_VIDEO READ_MEDIA_VISUAL_USER_SELECTED PO
+   "$ADB" shell pm grant "$PKG" "android.permission.$perm" > /dev/null 2>&1 || true
+ done
+ "$ADB" logcat -c > /dev/null 2>&1 || true
++# Make the system index the pushed test files, then wait until MediaStore lists them: the app
++# reads the library from MediaStore, so a file it does not list can never appear on screen.
++"$ADB" shell content call --uri content://media/ --method scan_volume --arg external_primary > "$OUT/scan.log" 2>&1 || true
++INDEXED=0
++for _ in $(seq 1 20); do
++  if "$ADB" shell content query --uri content://media/external/audio/media --projection _display_name 2> /dev/null | grep -q "Vortex_Test_Tone"; then INDEXED=1; break; fi
++  sleep 3
++done
++rm -f "$OUT/scan.log"
+ 
+ shot() { # <name>
+   "$ADB" exec-out screencap -p > "$OUT/$1.png" 2> /dev/null || true
+   [ -s "$OUT/$1.png" ] || rm -f "$OUT/$1.png"
+ }
+ alive() { [ -n "$("$ADB" shell pidof "$PKG" 2>/dev/null | tr -d '\r')" ]; }
+-tap_text() { # <visible text>; taps the centre of the first node showing it. 0 = tapped
++tap_text() { # <visible text> [bottom]; taps the centre of the first node showing it (with "bottom": the lowest one,
++  # which is the bottom bar and not a chip of the same name higher up). 0 = tapped
+   "$ADB" shell uiautomator dump /sdcard/vx_ui.xml > /dev/null 2>&1 || return 1
+   "$ADB" exec-out cat /sdcard/vx_ui.xml > "$OUT/ui.xml" 2> /dev/null || return 1
+   local xy
+-  xy="$(python3 - "$OUT/ui.xml" "$1" <<'PY'
++  xy="$(python3 - "$OUT/ui.xml" "$1" "${2:-}" <<'PY'
+ import re, sys
+ xml = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+ want = sys.argv[2]
++lowest = sys.argv[3] == "bottom"
+ nodes = re.findall(r"<node [^>]*>", xml)
+ def labels(node):
+     out = []
+@@ -131,13 +142,17 @@ def labels(node):
+     return out
+ # Exact label first; then a merged Compose node whose label starts with the text ("Audio Lab, …").
+ for match in (lambda l: l == want, lambda l: l.startswith(want + ",")):
++    found = []
+     for node in nodes:
+         if any(match(l) for l in labels(node)):
+             b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node)
+             if b:
+                 x1, y1, x2, y2 = map(int, b.groups())
+-                print((x1 + x2) // 2, (y1 + y2) // 2)
+-                sys.exit(0)
++                found.append(((x1 + x2) // 2, (y1 + y2) // 2))
++    if found:
++        x, y = max(found, key=lambda p: p[1]) if lowest else found[0]
++        print(x, y)
++        sys.exit(0)
+ PY
+ )"
+   [ -n "$xy" ] || return 1
+@@ -153,7 +168,7 @@ shot 00-opening
+ READY=0
+ for _ in $(seq 1 30); do
+   "$ADB" shell uiautomator dump /sdcard/vx_ui.xml > /dev/null 2>&1 || true
+-  if "$ADB" exec-out cat /sdcard/vx_ui.xml 2> /dev/null | grep -q 'text="Shorts"'; then READY=1; break; fi
++  if "$ADB" exec-out cat /sdcard/vx_ui.xml 2> /dev/null | grep -Eq '(text|content-desc)="You"'; then READY=1; break; fi
+   sleep 3
+ done
+ sleep 2
+@@ -165,8 +180,8 @@ elif [ "$READY" != 1 ]; then
+   say "Note: the bottom bar was not seen within 90 s of launch."
+ fi
+ 
+-visit() { # <tab label> <file name>
+-  if tap_text "$1"; then
++visit() { # <tab label> <file name>; the bottom bar tab, not a chip with the same name
++  if tap_text "$1" bottom; then
+     sleep 4
+     shot "$2"
+     if alive; then say "- $1: opened"; else say "- $1: **app stopped**"; PROBLEMS=$((PROBLEMS + 1)); fi
+@@ -176,8 +191,10 @@ visit() { # <tab label> <file name>
+   fi
+ }
+ say "Screens opened on the emulator (Pixel 6 profile, Android 14):"
++if [ "$INDEXED" = 1 ]; then say "- MediaStore lists the test tone: yes"; else say "- MediaStore lists the test tone: no (the emulator did not index it)"; fi
+ visit "Music" 02-music
+-if tap_text "Vortex Test Tone"; then
++sleep 3
++if tap_text "Vortex Test Tone" || tap_text "Vortex_Test_Tone"; then
+   sleep 5
+   shot 03-now-playing
+   if alive; then say "- Now Playing (test tone): opened"; else say "- Now Playing: **app stopped**"; PROBLEMS=$((PROBLEMS + 1)); fi
+@@ -187,7 +204,6 @@ else
+   say "- Now Playing: test tone not listed (library scan may be late)"
+ fi
+ visit "Video" 04-video
+-visit "Shorts" 05-shorts
+ visit "You" 06-you
+ if tap_text "Audio Lab"; then
+   sleep 4
