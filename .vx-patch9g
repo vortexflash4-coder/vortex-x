@@ -1,0 +1,459 @@
+diff --git a/app/src/main/java/com/vortexx/player/audio/dsp/DspChain.kt b/app/src/main/java/com/vortexx/player/audio/dsp/DspChain.kt
+index c62a2e3..7dff163 100644
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/DspChain.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/DspChain.kt
+@@ -1,6 +1,7 @@
+ package com.vortexx.player.audio.dsp
+ 
+ import kotlin.math.abs
++import kotlin.math.max
+ import kotlin.math.min
+ import kotlin.math.pow
+ 
+@@ -8,8 +9,8 @@ import kotlin.math.pow
+  * The Audio Lab's signal chain on interleaved float samples (−1…1):
+  *
+  * preamp → 10-band EQ → bass shelf → kick band → speaker protect →
+- * 3-band compressor → stereo width → bypass crossfade → limiter →
+- * clip count → meters.
++ * 3-band compressor → studio compressor → stereo width → balance → room →
++ * bypass crossfade → limiter → clip count → meters.
+  *
+  * Real-time rules: every array is allocated in [configure]; [process] does not
+  * allocate, lock or call into the platform. Nothing changes as a step: gains
+@@ -24,6 +25,7 @@ import kotlin.math.pow
+ class DspChain(
+     private val meters: MeterBus? = null,
+     private val dynamics: DynamicsMeters? = null,
++    private val studioMeters: StudioMeters? = null,
+ ) {
+ 
+     var sampleRate: Int = 0
+@@ -66,9 +68,23 @@ class DspChain(
+     private var compressorAmount = 0.0
+     private var compressorAmountTarget = 0.0
+ 
++    private val studioCompressor = StudioCompressor()
++    private var studioMix = 0.0
++    private var studioTarget = 0.0
++
+     private var width = 1.0
+     private var widthTarget = 1.0
+ 
++    // Balance: -1 (left only) … +1 (right only).
++    private var balance = 0.0
++    private var balanceTarget = 0.0
++
++    // The room: its wet share (0 = not heard) moves toward the target; the room runs while it is heard.
++    private val room = RoomReverb()
++    private var roomRunning = false
++    private var roomMix = 0.0
++    private var roomTarget = 0.0
++
+     private val limiter = LookaheadLimiter()
+     private var limiterRunning = false
+     private var limiterMix = 0.0
+@@ -79,6 +95,7 @@ class DspChain(
+     private val wetFrame = DoubleArray(MAX_CHANNELS)
+     private val outFrame = DoubleArray(MAX_CHANNELS)
+     private val directFrame = DoubleArray(MAX_CHANNELS)
++    private val roomFrame = DoubleArray(MAX_CHANNELS)
+ 
+     private var applied: DspParameters? = null
+ 
+@@ -102,6 +119,9 @@ class DspChain(
+         protectFilter.setHighPass(sampleRate, BassTone.PROTECT_HZ, MultibandCompressor.BUTTERWORTH_Q)
+         protectState = DoubleArray(2 * channelCount)
+         compressor.configure(sampleRate, channelCount)
++        studioCompressor.configure(sampleRate)
++        room.configure(sampleRate, channelCount)
++        applied?.let { studioCompressor.set(it.thresholdDb.toDouble(), it.ratio.toDouble(), it.attackMs, it.releaseMs) }
+         limiter.configure(sampleRate, channelCount)
+         if (limiterRunning) limiterWarmUp = 0
+     }
+@@ -112,6 +132,8 @@ class DspChain(
+         z2.fill(0.0)
+         protectState.fill(0.0)
+         compressor.reset()
++        studioCompressor.reset()
++        room.reset()
+         limiter.reset()
+     }
+ 
+@@ -147,6 +169,24 @@ class DspChain(
+         }
+ 
+         widthTarget = params.widthPercent.coerceIn(0, BassTone.MAX_WIDTH_PERCENT) / 100.0
++        balanceTarget = params.balance.coerceIn(-StudioTone.MAX_BALANCE, StudioTone.MAX_BALANCE) / StudioTone.MAX_BALANCE.toDouble()
++
++        studioCompressor.set(params.thresholdDb.toDouble(), params.ratio.toDouble(), params.attackMs, params.releaseMs)
++        if (params.studio) {
++            // Coming from off: start with a clean level memory, then fade in.
++            if (studioMix == 0.0 && studioTarget == 0.0) studioCompressor.reset()
++            studioTarget = 1.0
++        } else {
++            studioTarget = 0.0
++        }
++
++        room.setType(params.reverb)
++        roomTarget = if (params.reverb == ReverbType.Off) 0.0 else params.reverbMixPercent.coerceIn(0, StudioTone.MAX_MIX_PERCENT) / 100.0
++        if (roomTarget > 0.0 && !roomRunning) {
++            room.reset()
++            roomRunning = true
++            roomMix = 0.0
++        }
+ 
+         val wantLimiter = params.enabled && params.limiter
+         limiterTarget = if (wantLimiter) 1.0 else 0.0
+@@ -169,7 +209,10 @@ class DspChain(
+             mix = targetMix
+             protectMix = protectTarget
+             compressorMix = compressorTarget
++            studioMix = studioTarget
+             width = widthTarget
++            balance = balanceTarget
++            roomMix = roomTarget
+             if (wantLimiter) {
+                 limiterMix = 1.0
+                 limiterWarmUp = 0
+@@ -193,6 +236,9 @@ class DspChain(
+         var lowLowest = 1.0
+         var midLowest = 1.0
+         var highLowest = 1.0
++        var studioIn = 0.0
++        var studioOut = 0.0
++        var studioLowest = 1.0
+ 
+         var frame = 0
+         while (frame < frames) {
+@@ -208,6 +254,7 @@ class DspChain(
+                 if (mix != targetMix) mix = approach(mix, targetMix)
+                 if (protectMix != protectTarget) protectMix = approach(protectMix, protectTarget)
+                 if (compressorMix != compressorTarget) compressorMix = approach(compressorMix, compressorTarget)
++                if (studioMix != studioTarget) studioMix = approach(studioMix, studioTarget)
+                 val protecting = protectMix > 0.0
+                 val base = (frame + i) * channels
+ 
+@@ -253,6 +300,18 @@ class DspChain(
+                     if (high < highLowest) highLowest = high
+                 }
+ 
++                var levelIn = 0.0
++                for (c in 0 until channels) levelIn = max(levelIn, abs(wetFrame[c]))
++                if (levelIn > studioIn) studioIn = levelIn
++                if (studioMix > 0.0) {
++                    studioCompressor.process(wetFrame, channels, studioMix)
++                    val studioGain = studioCompressor.gain
++                    if (studioGain < studioLowest) studioLowest = studioGain
++                }
++                var levelOut = 0.0
++                for (c in 0 until channels) levelOut = max(levelOut, abs(wetFrame[c]))
++                if (levelOut > studioOut) studioOut = levelOut
++
+                 if (channels == 2 && width != 1.0) {
+                     val left = wetFrame[0]
+                     val right = wetFrame[1]
+@@ -262,6 +321,21 @@ class DspChain(
+                     wetFrame[1] = centre - side
+                 }
+ 
++                if (channels == 2 && balance != 0.0) {
++                    if (balance > 0.0) wetFrame[0] *= 1.0 - balance else wetFrame[1] *= 1.0 + balance
++                }
++
++                if (roomRunning && room.usable) {
++                    if (roomMix != roomTarget) roomMix = approach(roomMix, roomTarget)
++                    room.process(wetFrame, roomFrame)
++                    val heard = roomMix
++                    if (heard > 0.0) {
++                        for (c in 0 until channels) wetFrame[c] = wetFrame[c] * (1.0 - heard) + roomFrame[c] * heard
++                    } else if (roomTarget == 0.0) {
++                        roomRunning = false
++                    }
++                }
++
+                 val wetShare = mix
+                 val dryShare = 1.0 - mix
+                 for (c in 0 until channels) outFrame[c] = dryFrame[c] * dryShare + wetFrame[c] * wetShare
+@@ -306,6 +380,7 @@ class DspChain(
+         }
+         meters?.publish(peakLeft, peakRight, squaresLeft, squaresRight, frames, clipped, nowNanos)
+         dynamics?.publish(limiterLowest.toFloat(), lowLowest.toFloat(), midLowest.toFloat(), highLowest.toFloat())
++        studioMeters?.publish(studioIn.toFloat(), studioOut.toFloat(), studioLowest.toFloat())
+         return clipped
+     }
+ 
+@@ -329,7 +404,7 @@ class DspChain(
+         }
+     }
+ 
+-    /** Moves the compressor amount and the stereo width one step toward their targets. */
++    /** Moves the compressor amount, the stereo width and the balance one step toward their targets. */
+     private fun stepShaping() {
+         if (compressorTarget == 1.0 && compressorAmount != compressorAmountTarget) {
+             val delta = compressorAmountTarget - compressorAmount
+@@ -340,6 +415,10 @@ class DspChain(
+             val delta = widthTarget - width
+             width = if (abs(delta) <= WIDTH_STEP) widthTarget else width + if (delta > 0) WIDTH_STEP else -WIDTH_STEP
+         }
++        if (balance != balanceTarget) {
++            val delta = balanceTarget - balance
++            balance = if (abs(delta) <= WIDTH_STEP) balanceTarget else balance + if (delta > 0) WIDTH_STEP else -WIDTH_STEP
++        }
+     }
+ 
+     /** Moves the preamp one step toward its target and returns the linear gain at the end of the sub-block. */
+diff --git a/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt b/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt
+index 86800fb..fdec4aa 100644
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt
+@@ -17,6 +17,9 @@ interface DspHost {
+     /** Where the limiter and compressor report how much they turn down; null = not shown anywhere. */
+     val dynamics: DynamicsMeters? get() = null
+ 
++    /** Where the studio compressor reports its input and output level and how much it turns down; null = not shown anywhere. */
++    val studio: StudioMeters? get() = null
++
+     /** Called when the processor (de)activates for a stream format; [format] null = not processing. */
+     fun onProcessorConfigured(format: ProcessorFormat?, reason: String?)
+ 
+diff --git a/app/src/main/java/com/vortexx/player/audio/dsp/DspParameters.kt b/app/src/main/java/com/vortexx/player/audio/dsp/DspParameters.kt
+index 471f5da..33a27f5 100644
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/DspParameters.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/DspParameters.kt
+@@ -37,6 +37,19 @@ data class DspParameters(
+     val limiter: Boolean = false,
+     /** Stereo width: 100 = unchanged, 0 = mono, 200 = widest. Stereo streams only. */
+     val widthPercent: Int = 100,
++    /** The studio compressor (threshold, ratio, attack, release below) is working. */
++    val studio: Boolean = false,
++    /** Level above which the studio compressor turns the sound down, [StudioTone.MIN_THRESHOLD_DB]…[StudioTone.MAX_THRESHOLD_DB] dBFS. */
++    val thresholdDb: Float = StudioTone.DEFAULT_THRESHOLD_DB,
++    /** How many dB above the threshold give 1 dB out, [StudioTone.MIN_RATIO]…[StudioTone.MAX_RATIO]. */
++    val ratio: Float = StudioTone.DEFAULT_RATIO,
++    val attackMs: Int = StudioTone.DEFAULT_ATTACK_MS,
++    val releaseMs: Int = StudioTone.DEFAULT_RELEASE_MS,
++    /** −100 (left only) … 0 (centre) … +100 (right only). Stereo streams only. */
++    val balance: Int = 0,
++    val reverb: ReverbType = ReverbType.Off,
++    /** How much of the room is heard, 0…100 %. */
++    val reverbMixPercent: Int = StudioTone.DEFAULT_MIX_PERCENT,
+ ) {
+     init {
+         require(bandGainsDb.size == GraphicEqBands.COUNT) { "Expected ${GraphicEqBands.COUNT} bands" }
+@@ -45,7 +58,8 @@ data class DspParameters(
+     /** True when nothing would change the samples. */
+     val isFlat: Boolean
+         get() = preampDb == 0f && bandGainsDb.all { it == 0f } && bassDb == 0f && punchDb == 0f &&
+-            !speakerProtect && compressor == 0 && !limiter && widthPercent == 100
++            !speakerProtect && compressor == 0 && !limiter && widthPercent == 100 &&
++            !studio && balance == 0 && reverb == ReverbType.Off
+ 
+     /** Highest positive boost of any band, used to suggest headroom. */
+     val maxBoostDb: Float get() = bandGainsDb.maxOrNull()?.coerceAtLeast(0f) ?: 0f
+@@ -56,10 +70,27 @@ data class DspParameters(
+     fun withPreamp(gainDb: Float): DspParameters = copy(preampDb = clampPreamp(gainDb))
+ 
+     /** The sound of this snapshot without the two switches that belong to the device, not the taste. */
+-    fun sameSoundAs(other: DspParameters): Boolean =
+-        copy(enabled = true, speakerProtect = false) == other.copy(enabled = true, speakerProtect = false)
++    fun sameSoundAs(other: DspParameters): Boolean = soundKey() == other.soundKey()
++
++    /** What is heard: the two device switches and any setting that has no effect right now are left out. */
++    private fun soundKey(): DspParameters {
++        var key = copy(enabled = true, speakerProtect = false)
++        if (!studio) {
++            key = key.copy(
++                thresholdDb = StudioTone.DEFAULT_THRESHOLD_DB,
++                ratio = StudioTone.DEFAULT_RATIO,
++                attackMs = StudioTone.DEFAULT_ATTACK_MS,
++                releaseMs = StudioTone.DEFAULT_RELEASE_MS,
++            )
++        }
++        if (reverb == ReverbType.Off) key = key.copy(reverbMixPercent = StudioTone.DEFAULT_MIX_PERCENT)
++        return key
++    }
+ 
+-    /** One line for storage: "1;preamp;bands;bass;punch;protect;compressor;limiter;width". */
++    /**
++     * One line for storage: "2;preamp;bands;bass;punch;protect;compressor;limiter;width;studio;threshold;ratio;
++     * attack;release;balance;reverb;reverbMix". [decode] also reads the older nine-part lines that start with 1.
++     */
+     fun encode(): String = listOf(
+         FORMAT,
+         preampDb.toString(),
+@@ -70,10 +101,19 @@ data class DspParameters(
+         compressor.toString(),
+         if (limiter) "1" else "0",
+         widthPercent.toString(),
++        if (studio) "1" else "0",
++        thresholdDb.toString(),
++        ratio.toString(),
++        attackMs.toString(),
++        releaseMs.toString(),
++        balance.toString(),
++        reverb.name,
++        reverbMixPercent.toString(),
+     ).joinToString(";")
+ 
+     companion object {
+-        private const val FORMAT = "1"
++        private const val FORMAT = "2"
++        private const val FORMAT_WITHOUT_STUDIO = "1"
+         val FLAT: List<Float> = List(GraphicEqBands.COUNT) { 0f }
+ 
+         fun clampGain(db: Float): Float = roundTenth(db.coerceIn(-GraphicEqBands.MAX_GAIN_DB, GraphicEqBands.MAX_GAIN_DB))
+@@ -88,6 +128,19 @@ data class DspParameters(
+ 
+         fun clampWidth(percent: Int): Int = percent.coerceIn(0, BassTone.MAX_WIDTH_PERCENT)
+ 
++        fun clampThreshold(db: Float): Float = roundTenth(db.coerceIn(StudioTone.MIN_THRESHOLD_DB, StudioTone.MAX_THRESHOLD_DB))
++
++        fun clampRatio(ratio: Float): Float =
++            if (ratio.isNaN()) StudioTone.DEFAULT_RATIO else roundTenth(ratio.coerceIn(StudioTone.MIN_RATIO, StudioTone.MAX_RATIO))
++
++        fun clampAttack(ms: Int): Int = ms.coerceIn(StudioTone.MIN_ATTACK_MS, StudioTone.MAX_ATTACK_MS)
++
++        fun clampRelease(ms: Int): Int = ms.coerceIn(StudioTone.MIN_RELEASE_MS, StudioTone.MAX_RELEASE_MS)
++
++        fun clampBalance(balance: Int): Int = balance.coerceIn(-StudioTone.MAX_BALANCE, StudioTone.MAX_BALANCE)
++
++        fun clampMix(percent: Int): Int = percent.coerceIn(0, StudioTone.MAX_MIX_PERCENT)
++
+         /** 0.1 dB resolution keeps stored values readable and comparisons exact. */
+         private fun roundTenth(db: Float): Float = if (db.isNaN()) 0f else Math.round(db * 10f) / 10f
+ 
+@@ -106,8 +159,9 @@ data class DspParameters(
+         /** Reads a line written by [encode]; null when it is not one. Every value is clamped to its range. */
+         fun decode(raw: String?): DspParameters? {
+             val parts = raw?.split(';') ?: return null
+-            if (parts.size != 9 || parts[0] != FORMAT) return null
+-            return DspParameters(
++            val withStudio = parts.size == 17 && parts[0] == FORMAT
++            if (!withStudio && !(parts.size == 9 && parts[0] == FORMAT_WITHOUT_STUDIO)) return null
++            val base = DspParameters(
+                 preampDb = clampPreamp(parts[1].toFloatOrNull() ?: return null),
+                 bandGainsDb = parseBands(parts[2]),
+                 bassDb = clampBass(parts[3].toFloatOrNull() ?: return null),
+@@ -117,6 +171,17 @@ data class DspParameters(
+                 limiter = parts[7] == "1",
+                 widthPercent = clampWidth(parts[8].toIntOrNull() ?: return null),
+             )
++            if (!withStudio) return base
++            return base.copy(
++                studio = parts[9] == "1",
++                thresholdDb = clampThreshold(parts[10].toFloatOrNull() ?: return null),
++                ratio = clampRatio(parts[11].toFloatOrNull() ?: return null),
++                attackMs = clampAttack(parts[12].toIntOrNull() ?: return null),
++                releaseMs = clampRelease(parts[13].toIntOrNull() ?: return null),
++                balance = clampBalance(parts[14].toIntOrNull() ?: return null),
++                reverb = ReverbType.fromName(parts[15]),
++                reverbMixPercent = clampMix(parts[16].toIntOrNull() ?: return null),
++            )
+         }
+     }
+ }
+diff --git a/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt b/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
+index b264720..3029be9 100644
+--- a/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
++++ b/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
+@@ -16,8 +16,11 @@ import com.vortexx.player.audio.dsp.MeterBus
+ import com.vortexx.player.audio.dsp.PresetEdit
+ import com.vortexx.player.audio.dsp.PresetResult
+ import com.vortexx.player.audio.dsp.ProcessorFormat
++import com.vortexx.player.audio.dsp.ReverbType
+ import com.vortexx.player.audio.dsp.SoundPreset
+ import com.vortexx.player.audio.dsp.SoundPresets
++import com.vortexx.player.audio.dsp.StudioMeters
++import com.vortexx.player.audio.dsp.StudioTone
+ import com.vortexx.player.di.ApplicationScope
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Job
+@@ -61,6 +64,7 @@ class AudioEngine @Inject constructor(
+     override val meters = MeterBus()
+     override val load = LoadMeter()
+     override val dynamics = DynamicsMeters()
++    override val studio = StudioMeters()
+ 
+     /** The user's settings, as shown in the Audio Lab and saved. */
+     private var userParameters = DspParameters()
+@@ -105,6 +109,14 @@ class AudioEngine @Inject constructor(
+                 compressor = DspParameters.clampCompressor(prefs[KEY_COMPRESSOR] ?: 0),
+                 limiter = prefs[KEY_LIMITER] ?: false,
+                 widthPercent = DspParameters.clampWidth(prefs[KEY_WIDTH] ?: 100),
++                studio = prefs[KEY_STUDIO] ?: false,
++                thresholdDb = DspParameters.clampThreshold(prefs[KEY_THRESHOLD] ?: StudioTone.DEFAULT_THRESHOLD_DB),
++                ratio = DspParameters.clampRatio(prefs[KEY_RATIO] ?: StudioTone.DEFAULT_RATIO),
++                attackMs = DspParameters.clampAttack(prefs[KEY_ATTACK] ?: StudioTone.DEFAULT_ATTACK_MS),
++                releaseMs = DspParameters.clampRelease(prefs[KEY_RELEASE] ?: StudioTone.DEFAULT_RELEASE_MS),
++                balance = DspParameters.clampBalance(prefs[KEY_BALANCE] ?: 0),
++                reverb = ReverbType.fromName(prefs[KEY_REVERB]),
++                reverbMixPercent = DspParameters.clampMix(prefs[KEY_REVERB_MIX] ?: StudioTone.DEFAULT_MIX_PERCENT),
+             )
+             _userPresets.value = SoundPresets.decodeUser(prefs[KEY_USER_PRESETS])
+             val mode = OutputModePreference.entries.firstOrNull { it.name == prefs[KEY_OUTPUT_MODE] } ?: OutputModePreference.Dsp
+@@ -135,6 +147,22 @@ class AudioEngine @Inject constructor(
+ 
+     fun setWidth(percent: Int) = publish(userParameters.copy(widthPercent = DspParameters.clampWidth(percent)))
+ 
++    fun setStudio(on: Boolean) = publish(userParameters.copy(studio = on))
++
++    fun setThreshold(db: Float) = publish(userParameters.copy(thresholdDb = DspParameters.clampThreshold(db)))
++
++    fun setRatio(ratio: Float) = publish(userParameters.copy(ratio = DspParameters.clampRatio(ratio)))
++
++    fun setAttack(ms: Int) = publish(userParameters.copy(attackMs = DspParameters.clampAttack(ms)))
++
++    fun setRelease(ms: Int) = publish(userParameters.copy(releaseMs = DspParameters.clampRelease(ms)))
++
++    fun setBalance(balance: Int) = publish(userParameters.copy(balance = DspParameters.clampBalance(balance)))
++
++    fun setReverb(type: ReverbType) = publish(userParameters.copy(reverb = type))
++
++    fun setReverbMix(percent: Int) = publish(userParameters.copy(reverbMixPercent = DspParameters.clampMix(percent)))
++
+     /** Takes the preset's sound; the on/off switch and speaker protect stay as they are. */
+     fun applyPreset(preset: SoundPreset) =
+         publish(preset.parameters.copy(enabled = userParameters.enabled, speakerProtect = userParameters.speakerProtect))
+@@ -219,6 +247,14 @@ class AudioEngine @Inject constructor(
+                 prefs[KEY_COMPRESSOR] = next.compressor
+                 prefs[KEY_LIMITER] = next.limiter
+                 prefs[KEY_WIDTH] = next.widthPercent
++                prefs[KEY_STUDIO] = next.studio
++                prefs[KEY_THRESHOLD] = next.thresholdDb
++                prefs[KEY_RATIO] = next.ratio
++                prefs[KEY_ATTACK] = next.attackMs
++                prefs[KEY_RELEASE] = next.releaseMs
++                prefs[KEY_BALANCE] = next.balance
++                prefs[KEY_REVERB] = next.reverb.name
++                prefs[KEY_REVERB_MIX] = next.reverbMixPercent
+             }
+         }
+     }
+@@ -236,5 +272,13 @@ class AudioEngine @Inject constructor(
+         val KEY_LIMITER = booleanPreferencesKey("dsp_limiter")
+         val KEY_WIDTH = intPreferencesKey("dsp_width_percent")
+         val KEY_USER_PRESETS = stringPreferencesKey("dsp_user_presets")
++        val KEY_STUDIO = booleanPreferencesKey("dsp_studio")
++        val KEY_THRESHOLD = floatPreferencesKey("dsp_studio_threshold_db")
++        val KEY_RATIO = floatPreferencesKey("dsp_studio_ratio")
++        val KEY_ATTACK = intPreferencesKey("dsp_studio_attack_ms")
++        val KEY_RELEASE = intPreferencesKey("dsp_studio_release_ms")
++        val KEY_BALANCE = intPreferencesKey("dsp_balance")
++        val KEY_REVERB = stringPreferencesKey("dsp_reverb")
++        val KEY_REVERB_MIX = intPreferencesKey("dsp_reverb_mix")
+     }
+ }
+diff --git a/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt b/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt
+index d81e52f..459297f 100644
+--- a/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt
++++ b/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt
+@@ -22,7 +22,7 @@ import java.nio.ByteBuffer
+ @UnstableApi
+ class VortexAudioProcessor(private val host: DspHost) : BaseAudioProcessor() {
+ 
+-    private val chain = DspChain(host.meters, host.dynamics)
++    private val chain = DspChain(host.meters, host.dynamics, host.studio)
+     private val work = FloatArray(CHUNK_FRAMES * DspChain.MAX_CHANNELS)
+ 
+     private var pendingFormat: AudioProcessor.AudioFormat? = null
