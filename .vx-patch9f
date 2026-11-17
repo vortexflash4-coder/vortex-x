@@ -1,0 +1,21 @@
+diff --git a/.github/scripts/ci-smoke.sh b/.github/scripts/ci-smoke.sh
+index 44f5c84..4d5d43f 100755
+--- a/.github/scripts/ci-smoke.sh
++++ b/.github/scripts/ci-smoke.sh
+@@ -76,13 +76,14 @@ if [ "$BOOTED" != 1 ]; then
+ fi
+ "$ADB" shell input keyevent 82 > /dev/null 2>&1 || true
+ 
+-# Test media: a 12 s tone, and (when ffmpeg is on the machine) a 6 s portrait clip.
++# Test media: a 45 s tone (the library hides audio under 30 s by default, so it must be longer than that),
++# and (when ffmpeg is on the machine) a 6 s portrait clip.
+ python3 - "$OUT/vortex_test_tone.wav" <<'PY'
+ import math, struct, sys, wave
+ with wave.open(sys.argv[1], "wb") as w:
+     w.setnchannels(2); w.setsampwidth(2); w.setframerate(44100)
+     frames = bytearray()
+-    for i in range(44100 * 12):
++    for i in range(44100 * 45):
+         v = int(9000 * math.sin(2 * math.pi * 440 * i / 44100))
+         frames += struct.pack("<hh", v, v)
+     w.writeframes(bytes(frames))
