@@ -1,0 +1,321 @@
+diff --git a/app/src/main/java/com/vortexx/player/audio/dsp/DspChain.kt b/app/src/main/java/com/vortexx/player/audio/dsp/DspChain.kt
+index 7dff163..5659d8c 100644
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/DspChain.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/DspChain.kt
+@@ -10,7 +10,7 @@ import kotlin.math.pow
+  *
+  * preamp → 10-band EQ → bass shelf → kick band → speaker protect →
+  * 3-band compressor → studio compressor → stereo width → balance → room →
+- * bypass crossfade → limiter → clip count → meters.
++ * Jhankar engine → bypass crossfade → limiter → clip count → meters.
+  *
+  * Real-time rules: every array is allocated in [configure]; [process] does not
+  * allocate, lock or call into the platform. Nothing changes as a step: gains
+@@ -26,6 +26,8 @@ class DspChain(
+     private val meters: MeterBus? = null,
+     private val dynamics: DynamicsMeters? = null,
+     private val studioMeters: StudioMeters? = null,
++    private val jhankarMeters: JhankarMeters? = null,
++    private val spectrum: SpectrumBus? = null,
+ ) {
+ 
+     var sampleRate: Int = 0
+@@ -85,6 +87,9 @@ class DspChain(
+     private var roomMix = 0.0
+     private var roomTarget = 0.0
+ 
++    // The Jhankar engine: one stage group in this chain, with its own settings (see JhankarParameters).
++    private val jhankar = JhankarStage(jhankarMeters)
++
+     private val limiter = LookaheadLimiter()
+     private var limiterRunning = false
+     private var limiterMix = 0.0
+@@ -121,6 +126,8 @@ class DspChain(
+         compressor.configure(sampleRate, channelCount)
+         studioCompressor.configure(sampleRate)
+         room.configure(sampleRate, channelCount)
++        jhankar.configure(sampleRate, channelCount)
++        spectrum?.sampleRate = sampleRate
+         applied?.let { studioCompressor.set(it.thresholdDb.toDouble(), it.ratio.toDouble(), it.attackMs, it.releaseMs) }
+         limiter.configure(sampleRate, channelCount)
+         if (limiterRunning) limiterWarmUp = 0
+@@ -134,9 +141,13 @@ class DspChain(
+         compressor.reset()
+         studioCompressor.reset()
+         room.reset()
++        jhankar.resetState()
+         limiter.reset()
+     }
+ 
++    /** Takes a new Jhankar setting. Cheap when [params] is the one already applied (reference check). */
++    fun applyJhankar(params: JhankarParameters) = jhankar.set(params)
++
+     /**
+      * Takes a new parameter snapshot. Cheap when [params] is the snapshot
+      * already applied (reference check), so it can be called every buffer.
+@@ -245,6 +256,8 @@ class DspChain(
+             val n = min(SUB_BLOCK, frames - frame)
+             stepGains()
+             stepShaping()
++            val jhankarRunning = jhankar.isActive
++            if (jhankarRunning) jhankar.beginBlock(n)
+             val preStart = currentPreampLinear
+             val preEnd = stepPreamp()
+             val preDelta = (preEnd - preStart) / n
+@@ -336,6 +349,8 @@ class DspChain(
+                     }
+                 }
+ 
++                if (jhankarRunning) jhankar.process(wetFrame, channels)
++
+                 val wetShare = mix
+                 val dryShare = 1.0 - mix
+                 for (c in 0 until channels) outFrame[c] = dryFrame[c] * dryShare + wetFrame[c] * wetShare
+@@ -381,6 +396,8 @@ class DspChain(
+         meters?.publish(peakLeft, peakRight, squaresLeft, squaresRight, frames, clipped, nowNanos)
+         dynamics?.publish(limiterLowest.toFloat(), lowLowest.toFloat(), midLowest.toFloat(), highLowest.toFloat())
+         studioMeters?.publish(studioIn.toFloat(), studioOut.toFloat(), studioLowest.toFloat())
++        if (jhankar.isActive) jhankar.endBuffer()
++        spectrum?.write(buffer, frames, channels)
+         return clipped
+     }
+ 
+diff --git a/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt b/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt
+index fdec4aa..a31ca4d 100644
+--- a/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt
++++ b/app/src/main/java/com/vortexx/player/audio/dsp/DspHost.kt
+@@ -20,6 +20,15 @@ interface DspHost {
+     /** Where the studio compressor reports its input and output level and how much it turns down; null = not shown anywhere. */
+     val studio: StudioMeters? get() = null
+ 
++    /** The Jhankar engine's setting for the current output (a volatile read). The default is the engine switched off. */
++    val jhankar: JhankarParameters get() = JhankarParameters.OFF
++
++    /** Where the Jhankar engine reports its bass boost, punch and compression; null = not shown anywhere. */
++    val jhankarMeters: JhankarMeters? get() = null
++
++    /** Where the finished output is copied for the spectrum analyzer; null = no analyzer. */
++    val spectrum: SpectrumBus? get() = null
++
+     /** Called when the processor (de)activates for a stream format; [format] null = not processing. */
+     fun onProcessorConfigured(format: ProcessorFormat?, reason: String?)
+ 
+diff --git a/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt b/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
+index 3029be9..9e26ed0 100644
+--- a/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
++++ b/app/src/main/java/com/vortexx/player/audio/engine/AudioEngine.kt
+@@ -11,14 +11,21 @@ import com.vortexx.player.audio.dsp.DspHost
+ import com.vortexx.player.audio.dsp.DspParameters
+ import com.vortexx.player.audio.dsp.DynamicsMeters
+ import com.vortexx.player.audio.dsp.EqResponse
++import com.vortexx.player.audio.dsp.JhankarMeters
++import com.vortexx.player.audio.dsp.JhankarParameters
++import com.vortexx.player.audio.dsp.JhankarPreset
++import com.vortexx.player.audio.dsp.JhankarPresetEdit
++import com.vortexx.player.audio.dsp.JhankarPresets
+ import com.vortexx.player.audio.dsp.LoadMeter
+ import com.vortexx.player.audio.dsp.MeterBus
++import com.vortexx.player.audio.dsp.OutputProfile
+ import com.vortexx.player.audio.dsp.PresetEdit
+ import com.vortexx.player.audio.dsp.PresetResult
+ import com.vortexx.player.audio.dsp.ProcessorFormat
+ import com.vortexx.player.audio.dsp.ReverbType
+ import com.vortexx.player.audio.dsp.SoundPreset
+ import com.vortexx.player.audio.dsp.SoundPresets
++import com.vortexx.player.audio.dsp.SpectrumBus
+ import com.vortexx.player.audio.dsp.StudioMeters
+ import com.vortexx.player.audio.dsp.StudioTone
+ import com.vortexx.player.di.ApplicationScope
+@@ -39,6 +46,18 @@ enum class OutputModePreference(val label: String, val summary: String) {
+     Offload("Battery offload", "Hardware decodes where supported; Audio Lab off"),
+ }
+ 
++/**
++ * What the Jhankar Sound Studio shows: the master switch, the output it is tuned for and that output's settings
++ * ([parameters] always has `engine == engineOn`). With [autoProfile] on, a change of output (a Bluetooth speaker
++ * connecting, headphones plugged in) selects the matching profile.
++ */
++data class JhankarState(
++    val engineOn: Boolean = false,
++    val profile: OutputProfile = OutputProfile.PremiumStereo,
++    val autoProfile: Boolean = true,
++    val parameters: JhankarParameters = JhankarPresets.defaultFor(OutputProfile.PremiumStereo),
++)
++
+ /** The processor's view of the current stream, published from the playback thread. */
+ data class ProcessorState(
+     val format: ProcessorFormat?,
+@@ -65,6 +84,8 @@ class AudioEngine @Inject constructor(
+     override val load = LoadMeter()
+     override val dynamics = DynamicsMeters()
+     override val studio = StudioMeters()
++    override val jhankarMeters = JhankarMeters()
++    override val spectrum = SpectrumBus()
+ 
+     /** The user's settings, as shown in the Audio Lab and saved. */
+     private var userParameters = DspParameters()
+@@ -96,6 +117,23 @@ class AudioEngine @Inject constructor(
+ 
+     private var saveJob: Job? = null
+ 
++    // The Jhankar engine: one master switch, the output being tuned, and one setting for each output (stored with engine = false).
++    @Volatile
++    override var jhankar: JhankarParameters = JhankarParameters.OFF
++        private set
++
++    private var jhEngineOn = false
++    private var jhAuto = true
++    private var jhProfile = OutputProfile.PremiumStereo
++    private val jhSettings = java.util.concurrent.ConcurrentHashMap<OutputProfile, JhankarParameters>()
++    private val _jhankarState = MutableStateFlow(JhankarState())
++    val jhankarState: StateFlow<JhankarState> = _jhankarState.asStateFlow()
++    private val _jhankarPresets = MutableStateFlow<List<JhankarPreset>>(emptyList())
++
++    /** The Jhankar sounds the user saved, oldest first. */
++    val jhankarPresets: StateFlow<List<JhankarPreset>> = _jhankarPresets.asStateFlow()
++    private var jhSaveJob: Job? = null
++
+     init {
+         scope.launch {
+             val prefs = dataStore.data.first()
+@@ -119,6 +157,15 @@ class AudioEngine @Inject constructor(
+                 reverbMixPercent = DspParameters.clampMix(prefs[KEY_REVERB_MIX] ?: StudioTone.DEFAULT_MIX_PERCENT),
+             )
+             _userPresets.value = SoundPresets.decodeUser(prefs[KEY_USER_PRESETS])
++            for (profile in OutputProfile.entries) {
++                jhSettings[profile] = JhankarParameters.decode(prefs[KEYS_JH_PROFILE.getValue(profile)])?.copy(engine = false)
++                    ?: JhankarPresets.defaultFor(profile)
++            }
++            jhEngineOn = prefs[KEY_JH_ENGINE] ?: false
++            jhAuto = prefs[KEY_JH_AUTO] ?: true
++            jhProfile = OutputProfile.fromName(prefs[KEY_JH_PROFILE])
++            _jhankarPresets.value = JhankarPresets.decodeUser(prefs[KEY_JH_PRESETS])
++            publishJhankar(save = false)
+             val mode = OutputModePreference.entries.firstOrNull { it.name == prefs[KEY_OUTPUT_MODE] } ?: OutputModePreference.Dsp
+             processingAllowed = mode == OutputModePreference.Dsp
+             publish(restored, save = false)
+@@ -163,6 +210,91 @@ class AudioEngine @Inject constructor(
+ 
+     fun setReverbMix(percent: Int) = publish(userParameters.copy(reverbMixPercent = DspParameters.clampMix(percent)))
+ 
++    /** The Jhankar engine's master switch. Switching it on also switches the Audio Lab master and the limiter on. */
++    fun setJhankarEngine(on: Boolean) {
++        jhEngineOn = on
++        if (on && (!userParameters.enabled || !userParameters.limiter)) publish(userParameters.copy(enabled = true, limiter = true))
++        publishJhankar()
++    }
++
++    /** Chooses the output the Jhankar sound is tuned for (what the screen edits and what plays). */
++    fun selectJhankarProfile(profile: OutputProfile) {
++        if (profile == jhProfile) return
++        jhProfile = profile
++        publishJhankar()
++    }
++
++    /** With automatic selection on, [onOutputProfile] switches the profile when the output changes. */
++    fun setJhankarAuto(on: Boolean) {
++        jhAuto = on
++        publishJhankar()
++    }
++
++    /** Called when the phone's output changes to a kind that has a profile; ignored unless automatic selection is on. */
++    fun onOutputProfile(profile: OutputProfile) {
++        if (!jhAuto || profile == jhProfile) return
++        jhProfile = profile
++        publishJhankar()
++    }
++
++    /** Changes the setting of the profile being edited. The result is brought into range and saved. */
++    fun updateJhankar(change: (JhankarParameters) -> JhankarParameters) {
++        jhSettings[jhProfile] = change(jhankarSettings(jhProfile)).clamped().copy(engine = false)
++        publishJhankar()
++    }
++
++    /** Takes a Jhankar preset's sound onto the profile being edited. */
++    fun applyJhankarPreset(preset: JhankarPreset) = updateJhankar { preset.parameters }
++
++    fun resetJhankarEq() = updateJhankar { it.withFlatEq() }
++
++    /** Back to what the profile being edited started with. */
++    fun resetJhankarProfile() = updateJhankar { JhankarPresets.defaultFor(jhProfile) }
++
++    @Synchronized
++    fun saveJhankarPreset(name: String): PresetResult =
++        editJhankarPresets(JhankarPresets.save(_jhankarPresets.value, name, jhankarSettings(jhProfile)))
++
++    @Synchronized
++    fun renameJhankarPreset(name: String, newName: String): PresetResult =
++        editJhankarPresets(JhankarPresets.rename(_jhankarPresets.value, name, newName))
++
++    @Synchronized
++    fun deleteJhankarPreset(name: String): PresetResult =
++        editJhankarPresets(JhankarPresets.delete(_jhankarPresets.value, name))
++
++    private fun editJhankarPresets(edit: JhankarPresetEdit): PresetResult {
++        if (edit.result.done && edit.presets != _jhankarPresets.value) {
++            _jhankarPresets.value = edit.presets
++            scope.launch { dataStore.edit { it[KEY_JH_PRESETS] = JhankarPresets.encodeUser(_jhankarPresets.value) } }
++        }
++        return edit.result
++    }
++
++    private fun jhankarSettings(profile: OutputProfile): JhankarParameters = jhSettings[profile] ?: JhankarPresets.defaultFor(profile)
++
++    private fun publishJhankar(save: Boolean = true) {
++        val live = jhankarSettings(jhProfile).copy(engine = jhEngineOn)
++        jhankar = live
++        _jhankarState.value = JhankarState(jhEngineOn, jhProfile, jhAuto, live)
++        if (!save) return
++        // Everything the write needs is read here, on the calling thread; the write only stores it.
++        val engineOn = jhEngineOn
++        val auto = jhAuto
++        val profile = jhProfile
++        val lines = OutputProfile.entries.associateWith { jhankarSettings(it).copy(engine = false).encode() }
++        jhSaveJob?.cancel()
++        jhSaveJob = scope.launch {
++            delay(SAVE_DELAY_MS)
++            dataStore.edit { prefs ->
++                prefs[KEY_JH_ENGINE] = engineOn
++                prefs[KEY_JH_AUTO] = auto
++                prefs[KEY_JH_PROFILE] = profile.name
++                for ((p, line) in lines) prefs[KEYS_JH_PROFILE.getValue(p)] = line
++            }
++        }
++    }
++
+     /** Takes the preset's sound; the on/off switch and speaker protect stay as they are. */
+     fun applyPreset(preset: SoundPreset) =
+         publish(preset.parameters.copy(enabled = userParameters.enabled, speakerProtect = userParameters.speakerProtect))
+@@ -280,5 +412,11 @@ class AudioEngine @Inject constructor(
+         val KEY_BALANCE = intPreferencesKey("dsp_balance")
+         val KEY_REVERB = stringPreferencesKey("dsp_reverb")
+         val KEY_REVERB_MIX = intPreferencesKey("dsp_reverb_mix")
++        val KEY_JH_ENGINE = booleanPreferencesKey("jh_engine")
++        val KEY_JH_AUTO = booleanPreferencesKey("jh_auto_profile")
++        val KEY_JH_PROFILE = stringPreferencesKey("jh_profile")
++        val KEY_JH_PRESETS = stringPreferencesKey("jh_user_presets")
++        val KEYS_JH_PROFILE: Map<OutputProfile, androidx.datastore.preferences.core.Preferences.Key<String>> =
++            OutputProfile.entries.associateWith { stringPreferencesKey("jh_p_" + it.name.lowercase()) }
+     }
+ }
+diff --git a/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt b/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt
+index 459297f..63b091c 100644
+--- a/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt
++++ b/app/src/main/java/com/vortexx/player/audio/media3/VortexAudioProcessor.kt
+@@ -22,7 +22,7 @@ import java.nio.ByteBuffer
+ @UnstableApi
+ class VortexAudioProcessor(private val host: DspHost) : BaseAudioProcessor() {
+ 
+-    private val chain = DspChain(host.meters, host.dynamics, host.studio)
++    private val chain = DspChain(host.meters, host.dynamics, host.studio, host.jhankarMeters, host.spectrum)
+     private val work = FloatArray(CHUNK_FRAMES * DspChain.MAX_CHANNELS)
+ 
+     private var pendingFormat: AudioProcessor.AudioFormat? = null
+@@ -135,6 +135,7 @@ class VortexAudioProcessor(private val host: DspHost) : BaseAudioProcessor() {
+         val output = replaceOutputBuffer(frames * channels * bytesPerSample)
+         val buffer = work
+         chain.apply(host.parameters)
++        chain.applyJhankar(host.jhankar)
+ 
+         // Bounded chunks: the work array is allocated once, whatever buffer size Media3 sends.
+         var done = 0
