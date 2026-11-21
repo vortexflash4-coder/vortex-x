@@ -1,0 +1,110 @@
+diff --git a/app/src/main/java/com/vortexx/player/VortexApp.kt b/app/src/main/java/com/vortexx/player/VortexApp.kt
+index 6489d61..88d2656 100644
+--- a/app/src/main/java/com/vortexx/player/VortexApp.kt
++++ b/app/src/main/java/com/vortexx/player/VortexApp.kt
+@@ -1,6 +1,7 @@
+ package com.vortexx.player
+ 
+ import android.app.Application
++import com.vortexx.player.audio.engine.JhankarRouteMonitor
+ import com.vortexx.player.data.library.ArtworkLoader
+ import dagger.hilt.android.HiltAndroidApp
+ import javax.inject.Inject
+@@ -10,6 +11,14 @@ class VortexApp : Application() {
+ 
+     @Inject lateinit var artworkLoader: ArtworkLoader
+ 
++    @Inject lateinit var jhankarRoute: JhankarRouteMonitor
++
++    override fun onCreate() {
++        super.onCreate()
++        // Follows the output (speaker, Bluetooth, headphones) so the Jhankar profile can match it.
++        jhankarRoute.start()
++    }
++
+     override fun onTrimMemory(level: Int) {
+         super.onTrimMemory(level)
+         // Thumbnails are the largest re-creatable memory consumer.
+diff --git a/app/src/main/java/com/vortexx/player/feature/you/YouScreen.kt b/app/src/main/java/com/vortexx/player/feature/you/YouScreen.kt
+index ff6d373..d23f8a3 100644
+--- a/app/src/main/java/com/vortexx/player/feature/you/YouScreen.kt
++++ b/app/src/main/java/com/vortexx/player/feature/you/YouScreen.kt
+@@ -73,6 +73,8 @@ import com.vortexx.player.ui.navigation.DiagnosticsRoute
+ import com.vortexx.player.ui.navigation.ExplorerRoute
+ import com.vortexx.player.ui.navigation.QueueRoute
+ import com.vortexx.player.ui.navigation.SettingsRoute
++import com.vortexx.player.feature.jhankar.JhankarEntryCard
++import com.vortexx.player.ui.navigation.JhankarRoute
+ import com.vortexx.player.ui.navigation.StudioRoute
+ import dagger.hilt.android.lifecycle.HiltViewModel
+ import kotlinx.coroutines.Dispatchers
+@@ -159,6 +161,12 @@ fun YouScreen(
+                 modifier = Modifier.padding(horizontal = ScreenMargin),
+             )
+         }
++        item(key = "jhankar") {
++            JhankarEntryCard(
++                onClick = { onNavigate(JhankarRoute) },
++                modifier = Modifier.padding(horizontal = ScreenMargin, vertical = VortexSpacing.sm),
++            )
++        }
+         item(key = "tools-title") { SectionTitle("Tools") }
+         item(key = "tools") {
+             Column(
+diff --git a/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt b/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt
+index f75c868..dc4b3b0 100644
+--- a/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt
++++ b/app/src/main/java/com/vortexx/player/ui/app/AppChrome.kt
+@@ -65,6 +65,7 @@ import com.vortexx.player.ui.navigation.PlaylistDetailRoute
+ import com.vortexx.player.ui.navigation.PlaylistsRoute
+ import com.vortexx.player.ui.navigation.QueueRoute
+ import com.vortexx.player.ui.navigation.SettingsRoute
++import com.vortexx.player.ui.navigation.JhankarRoute
+ import com.vortexx.player.ui.navigation.StudioRoute
+ import com.vortexx.player.ui.navigation.VideosRoute
+ import com.vortexx.player.ui.navigation.YouRoute
+@@ -96,7 +97,7 @@ val PrimaryDestinations = listOf(
+         Icons.Outlined.Person,
+         Icons.Rounded.Person,
+         listOf(
+-            YouRoute::class, SettingsRoute::class, StudioRoute::class, DiagnosticsRoute::class, ControlCenterRoute::class, QueueRoute::class,
++            YouRoute::class, SettingsRoute::class, StudioRoute::class, JhankarRoute::class, DiagnosticsRoute::class, ControlCenterRoute::class, QueueRoute::class,
+             PlaylistsRoute::class, PlaylistDetailRoute::class, ExplorerRoute::class, ExplorerFolderRoute::class,
+         ),
+     ),
+diff --git a/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt b/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt
+index 5854126..a7be989 100644
+--- a/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt
++++ b/app/src/main/java/com/vortexx/player/ui/navigation/Routes.kt
+@@ -14,6 +14,7 @@ import kotlinx.serialization.Serializable
+ @Serializable data object QueueRoute
+ @Serializable data object ControlCenterRoute
+ @Serializable data object StudioRoute
++@Serializable data object JhankarRoute
+ @Serializable data object DiagnosticsRoute
+ 
+ /** The You hub: Audio Lab, settings, tools and app information. */
+diff --git a/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt b/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
+index 93845bf..1d770ed 100644
+--- a/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
++++ b/app/src/main/java/com/vortexx/player/ui/navigation/VortexNavHost.kt
+@@ -22,6 +22,7 @@ import com.vortexx.player.feature.playlists.PlaylistDetailScreen
+ import com.vortexx.player.feature.playlists.PlaylistsScreen
+ import com.vortexx.player.feature.queue.QueueScreen
+ import com.vortexx.player.feature.settings.SettingsScreen
++import com.vortexx.player.feature.jhankar.JhankarScreen
+ import com.vortexx.player.feature.studio.StudioScreen
+ import com.vortexx.player.feature.video.VideoLibraryScreen
+ import com.vortexx.player.feature.video.VideoPlayerScreen
+@@ -139,6 +140,11 @@ fun VortexNavHost(
+                 StudioScreen(onBack = back, onOpenDiagnostics = { navController.navigate(DiagnosticsRoute) { launchSingleTop = true } })
+             }
+         }
++        composable<JhankarRoute> {
++            AdaptiveWidth(VortexWidths.Reading) {
++                JhankarScreen(onBack = back)
++            }
++        }
+         composable<DiagnosticsRoute> {
+             AdaptiveWidth(VortexWidths.Reading) {
+                 DiagnosticsScreen(onBack = back)
